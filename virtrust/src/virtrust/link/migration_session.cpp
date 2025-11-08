@@ -69,6 +69,8 @@ MigrationSession::MigrationSession(Role role, const std::string &sessionId, cons
 MigrateSessionRc MigrationSession::Start()
 {
     if (role_ != Role::Initiator) {
+        VIRTRUST_LOG_ERROR("|Start|END|returnF|uuid: {}|Role is not the initiator of the migration.", sessionId_);
+        OnFail();
         return MigrateSessionRc::ERROR;
     }
     EnterState(State::Init);
