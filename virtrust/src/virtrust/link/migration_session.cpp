@@ -450,6 +450,79 @@ MigrateSessionRc MigrationSession::NotifyVRMigration(bool success)
     return MigrateSessionRc::OK;
 }
 
+MigrateSessionRc MigrationSession::GetVirConnContext(const std::string &uri, std::unique_ptr<ConnCtx> &outConn)
+{
+    auto conn = std::make_unique<ConnCtx>();
+    if (!conn->SetUri(uri)) {
+        VIRTRUST_LOG_ERROR("|SendTransferOnce|END|returnF||destUri is not valid: {}", uri);
+        return MigrateSessionRc::ERROR;
+    }
+
+    conn->Connect();
+    if (conn->Get() == nullptr) {
+        VIRTRUST_LOG_ERROR("|SendTransferOnce|END|returnF||failed to establish connection to: {}", uri);
+        return MigrateSessionRc::ERROR;
+    }
+
+    // 成功了再把拥有权交出去
+    outConn = std::move(conn);
+    return MigrateSessionRc::OK;
+}
+
+void MigrationSession::UndoMigration()
+{
+    // 防止server端误调
+    if (role_ != Role::Initiator) {
+        return;
+    }
+
+    // 1.删除对端虚拟机
+    UndefineForPeer();
+
+    // 2.通知TSB迁移失败
+    NotifyVRMigration(false);
+
+    // 3.通知peer迁移失败，并进行清理
+    OnFail();
+}
+
+// 删除对端虚拟机
+MigrateSessionRc MigrationSession::UndefineForPeer()
+{
+    std::unique_ptr<ConnCtx> destConn;
+    auto rc = GetVirConnContext(destUri_, destConn);
+    if (rc != MigrateSessionRc::OK) {
+        VIRTRUST_LOG_ERROR("|UndefineForPeer|END|returnF||failed to get virt connect: {}", destUri_);
+        return rc;
+    }
+
+    auto destDomain = std::make_unique<DomainCtx>(destConn, domainName_);
+    if (destDomain->Get() == nullptr) {
+        VIRTRUST_LOG_ERROR("|UndefineForPeer|END|returnF|failed to find destDomain: {}", domainName_);
+        return MigrateSessionRc::ERROR;
+    }
+
+    auto &libvirt = Libvirt::GetInstance();
+    if (libvirt.virDomainUndefineFlags(destDomain->Get(), DOMAIN_UNDEFINE_NVRAM) != 0) {
+        VIRTRUST_LOG_INFO("|UndefineForPeer|END|returnF|undefine dest domain: {} failed.", domainName_);
+        return MigrateSessionRc::ERROR;
+    }
+    return MigrateSessionRc::OK;
+}
+
+// 通知TSB迁移结果
+MigrateSessionRc MigrationSession::NotifyVRMigration(bool success)
+{
+    auto status = success ? 0 : -1;
+    auto ret = MigrationNotify(const_cast<char *>(sessionId_.c_str()), status);
+    if (ret != 0) {
+        VIRTRUST_LOG_INFO("|NotifyVRMigration|END|returnF|domainName:{}, migration statu: {}|Notify TSB failed.",
+                          domainName_, success);
+        return MigrateSessionRc::ERROR;
+    }
+    return MigrateSessionRc::OK;
+}
+
 void MigrationSession::EnterState(State s)
 {
     state_ = s;
