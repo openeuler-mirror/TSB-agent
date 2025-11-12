@@ -190,4 +190,36 @@ static trust_report_new ReportFromProto(const protos::TrustReportNew &protoRepor
 
     return report;
 }
+
+static void DescriptionToProto(const Description &desc, protos::Description *protoDesc)
+{
+    protoDesc->set_state(desc.state);
+
+    // Convert name to string, only copying actual data length (ignoring null padding)
+    size_t name_len = strnlen(desc.name, MAX_NAME_SIZE);
+    protoDesc->set_name(desc.name, name_len);
+
+    // Convert uuid to string (no length truncation for UUID)
+    protoDesc->set_uuid(desc.uuid, 37);
+}
+
+static Description DescriptionFromProto(const protos::Description &protoDesc)
+{
+    Description desc;
+    memset(&desc, 0, sizeof(desc));
+
+    desc.state = protoDesc.state();
+
+    // Convert name from string
+    const std::string &name = protoDesc.name();
+    size_t name_len = std::min(name.size(), static_cast<size_t>(MAX_NAME_SIZE));
+    memcpy(desc.name, name.data(), name_len);
+
+    // Convert uuid from string (no length truncation for UUID)
+    const std::string &uuid = protoDesc.uuid();
+    memcpy(desc.uuid, uuid.data(), std::min(uuid.size(), static_cast<size_t>(37)));
+
+    return desc;
+}
+
 } // namespace virtrust

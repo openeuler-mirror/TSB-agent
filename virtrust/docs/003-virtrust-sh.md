@@ -161,7 +161,7 @@ virtrust-sh undefine --only-tsb <vm-uuid>
 
 ### 5. migrate - 迁移虚拟机
 
-将虚拟机迁移到其他主机。
+将虚拟机迁移到其他主机。当前仅支持离线迁移，虚拟机在 running/shut-off 状态下，非共享存储需要用户手动复制磁盘文件，例如 qcow2 到目的端口，目标存在同名运行的虚拟机情况下不能迁移，可配置源虚拟机是否删除，重复迁移会覆盖目标端虚拟机。
 
 **基本语法**：
 ```bash
@@ -173,8 +173,8 @@ virtrust-sh migrate [options] <domain_name> <dest_uri>
 - `--undefinesource`：迁移完成后删除源主机的虚拟机定义
 
 **参数说明**：
-- `domain_name`：要迁移的虚拟机名称
-- `dest_uri`：目标主机 URI，格式为 `<protocol>://<host>:<port>/<path>`
+- `domain_name`：要迁移的虚拟机名称，长度为 [1, 200]
+- `dest_uri`：目标主机 URI，格式为 `<protocol>://<host>:<port>/<path>`，如 `qemu+tls://<destip>/system`
 
 **示例**：
 ```bash

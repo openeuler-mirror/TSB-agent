@@ -32,7 +32,8 @@ MigrationSession *SessionManager::CreateSession(MigrationSession::Role role, con
 
     auto it = sessions_.find(sessionId);
     if (it != sessions_.end()) {
-        return it->second.get();
+        VIRTRUST_LOG_ERROR("|CreateSession|END|returnF|uuid: {}|already exists session with same uuid.", sessionId);
+        return nullptr;
     }
 
     auto session = std::make_unique<MigrationSession>(role, sessionId, domainName, destUri, localUri, flags);
@@ -192,16 +193,25 @@ MigrateSessionRc MigrationSession::OnStartMigrationResponseReceived()
         OnFail();
         return MigrateSessionRc::ERROR;
     }
-
     std::string cipherStr(cipher, cipherLen);
     free(cipher);
 
+    // 收集虚机描述信息
+    Description vmInfo;
+    auto rc = GetVmInfo(vmInfo);
+    if (rc != MigrateSessionRc::OK) {
+        VIRTRUST_LOG_ERROR("|OnStartMigrationResponseReceived|END|returnF|domain name: {}|Get VM description failed.",
+                           domainName_);
+        OnFail();
+        return MigrateSessionRc::ERROR;
+    }
+
     // 进入传输阶段
     EnterState(State::Transferring);
-    return SendTransferOnce(cipherStr);
+    return SendTransferOnce(cipherStr, vmInfo);
 }
 
-MigrateSessionRc MigrationSession::SendTransferOnce(const std::string &cipher)
+MigrateSessionRc MigrationSession::SendTransferOnce(const std::string &cipher, const Description &vmInfo)
 {
     // 1.调用libvirt命令进行迁移
     MigrateSessionRc rc = MigrateByLibvirt();
@@ -214,7 +224,10 @@ MigrateSessionRc MigrationSession::SendTransferOnce(const std::string &cipher)
     // 2.传输数据
     protos::VRsourceInfoRequest req;
     req.set_uuid(sessionId_);
-    req.set_data(cipher);
+    req.set_cipherdata(cipher);
+    auto protosDesc = req.mutable_vtpcminfo();
+    DescriptionToProto(vmInfo, protosDesc);
+
     protos::VRsourceInfoReply res;
     int32_t ret = rpcClient_->SendVRsourceData(5, req, &res);
     // 传输数据失败
@@ -460,6 +473,32 @@ MigrateSessionRc MigrationSession::NotifyVRMigration(bool success)
     return MigrateSessionRc::OK;
 }
 
+MigrateSessionRc MigrationSession::GetVmInfo(Description &vmInfo)
+{
+    Description* raw = nullptr;
+    int vNums = 0;
+    int ret = GetVRoots(&vNums, &raw);
+
+    std::unique_ptr<Description, void(*)(Description*)> vInfos(raw, [](Description* p){ if (p) free(p); });
+
+    if (ret != 0 || raw == nullptr || vNums <= 0) {
+        VIRTRUST_LOG_INFO("|GetVmInfo|END|returnF||Get all vm descriptions failed.");
+        return MigrateSessionRc::ERROR;
+    }
+
+    const std::string& uuid = sessionId_;
+
+    for (int i = 0; i < vNums; ++i) {
+        if (std::strncmp(vInfos.get()[i].uuid, uuid.c_str(), sizeof(vInfos.get()[i].uuid)) == 0) {
+            vmInfo = vInfos.get()[i];
+            return MigrateSessionRc::OK;
+        }
+    }
+
+    VIRTRUST_LOG_ERROR("|GetVmInfo|END|returnF|uuid: {}|VM with specified UUID not found.", uuid);
+    return MigrateSessionRc::ERROR;
+}
+
 void MigrationSession::EnterState(State s)
 {
     state_ = s;
@@ -525,9 +564,8 @@ void MigrationSession::OnFail()
         }
     }
 
-    // 进入失败状态并进行清理
+    // 进入失败状态
     EnterState(State::Failed);
-    Cleanup();
 }
 
 MigrateSessionRc MigrationSession::OnMigrateRequestReceived()
@@ -607,9 +645,9 @@ MigrateSessionRc MigrationSession::OnTransferDataRequestReceived(const protos::V
             "|OnTransferDataRequestReceived|END|returnF|domain name: {}|Waiting for transfering timeout.", domainName_);
         return MigrateSessionRc::ERROR;
     }
-    // 服务端校验客户端发来的虚拟机资源信息
+    // 导入服务端校验客户端发来的虚拟机资源信息
     auto ret = MigrationImportVrootCipher(const_cast<char *>(request->uuid().c_str()),
-                                          const_cast<char *>(request->data().c_str()));
+                                          const_cast<char *>(request->cipherdata().c_str()));
     if (ret != 0) {
         EnterState(State::Failed);
         Cleanup();
@@ -618,6 +656,20 @@ MigrateSessionRc MigrationSession::OnTransferDataRequestReceived(const protos::V
             domainName_);
         return MigrateSessionRc::ERROR;
     }
+
+    // 导入服务端发来的虚拟机描述信息
+    auto protosDesc = request->vtpcminfo();
+    auto vmInfo = DescriptionFromProto(protosDesc);
+    ret = CreateVRoot(&vmInfo);
+    if (ret != 0) {
+        EnterState(State::Failed);
+        Cleanup();
+        VIRTRUST_LOG_ERROR(
+            "|OnTransferDataRequestReceived|END|returnF|domain name: {}|CreateVRoot failed.", domainName_);
+        return MigrateSessionRc::ERROR;
+    }
+
+    // 刷新定时器
     EnterState(State::Transferring);
     return MigrateSessionRc::OK;
 }

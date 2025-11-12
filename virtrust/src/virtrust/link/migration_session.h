@@ -95,7 +95,7 @@ private:
 
     MigrateSessionRc SendStartMigration();
 
-    MigrateSessionRc SendTransferOnce(const std::string &cipher);
+    MigrateSessionRc SendTransferOnce(const std::string &cipher, const Description &vmInfo);
 
     MigrateSessionRc SendFinishedNotify(bool success);
 
@@ -107,6 +107,8 @@ private:
 
     MigrateSessionRc VerifyHostAndVmReport(const protos::TrustReportNew &hostReport,
                                            const protos::TrustReportNew &vmReport);
+
+    MigrateSessionRc GetVmInfo(Description &vmInfo);
 
     MigrateSessionRc MigrateByLibvirt();
 
@@ -126,10 +128,6 @@ private:
     std::string destUri_;
     std::string localUri_;
     unsigned int flags_;
-    bool delFalgs_;
-
-    std::string myPubKey_;
-    std::string peerPubKey_;
 
     // 仅 Initiator 侧使用
     std::unique_ptr<RpcClient> rpcClient_;

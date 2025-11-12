@@ -338,4 +338,194 @@ TEST_F(ProtoToolsTest, EmptyReportConversion)
     }
 }
 
+TEST_F(ProtoToolsTest, DescriptionToProtoBasicFields)
+{
+    // Initialize a test Description
+    Description testDesc;
+    memset(&testDesc, 0, sizeof(testDesc));
+    testDesc.state = 1; // Running state
+
+    protos::Description protoDesc;
+    DescriptionToProto(testDesc, &protoDesc);
+
+    // Verify basic fields
+    EXPECT_EQ(protoDesc.state(), testDesc.state);
+}
+
+TEST_F(ProtoToolsTest, DescriptionToProtoNameField)
+{
+    // Initialize a test Description
+    Description testDesc;
+    memset(&testDesc, 0, sizeof(testDesc));
+    testDesc.state = 1;
+
+    // Set name field with test data
+    const char *testName = "test_vm_instance_001";
+    size_t nameLen = std::min(strlen(testName), static_cast<size_t>(MAX_NAME_SIZE));
+    memcpy(testDesc.name, testName, nameLen);
+
+    protos::Description protoDesc;
+    DescriptionToProto(testDesc, &protoDesc);
+
+    // Verify name field - should match the actual string length (ignoring null padding)
+    size_t expectedNameLen = strnlen(testDesc.name, MAX_NAME_SIZE);
+    EXPECT_EQ(protoDesc.name(),
+              std::string(testDesc.name, expectedNameLen));
+}
+
+TEST_F(ProtoToolsTest, DescriptionToProtoUuidField)
+{
+    // Initialize a test Description
+    Description testDesc;
+    memset(&testDesc, 0, sizeof(testDesc));
+    testDesc.state = 1;
+
+    // Set uuid field with test data (36 chars + null terminator)
+    const char *testUuid = "123e4567-e89b-12d3-a456-426614174000";
+    memcpy(testDesc.uuid, testUuid, 37);
+
+    protos::Description protoDesc;
+    DescriptionToProto(testDesc, &protoDesc);
+
+    // Verify uuid field - should be full 37 bytes (including null terminator)
+    EXPECT_EQ(protoDesc.uuid(),
+              std::string(testDesc.uuid, 37));
+}
+
+TEST_F(ProtoToolsTest, DescriptionFromProtoBasicFields)
+{
+    // Initialize a test Description
+    Description testDesc;
+    memset(&testDesc, 0, sizeof(testDesc));
+    testDesc.state = 1;
+
+    protos::Description protoDesc;
+    DescriptionToProto(testDesc, &protoDesc);
+
+    Description convertedDesc = DescriptionFromProto(protoDesc);
+
+    // Verify basic fields
+    EXPECT_EQ(convertedDesc.state, testDesc.state);
+}
+
+TEST_F(ProtoToolsTest, DescriptionFromProtoNameField)
+{
+    // Initialize a test Description
+    Description testDesc;
+    memset(&testDesc, 0, sizeof(testDesc));
+    testDesc.state = 1;
+
+    // Set name field with test data
+    const char *testName = "test_vm_instance_001";
+    size_t nameLen = std::min(strlen(testName), static_cast<size_t>(MAX_NAME_SIZE));
+    memcpy(testDesc.name, testName, nameLen);
+
+    protos::Description protoDesc;
+    DescriptionToProto(testDesc, &protoDesc);
+
+    Description convertedDesc = DescriptionFromProto(protoDesc);
+
+    // Verify name field
+    EXPECT_EQ(memcmp(convertedDesc.name, testDesc.name, MAX_NAME_SIZE), 0);
+}
+
+TEST_F(ProtoToolsTest, DescriptionFromProtoUuidField)
+{
+    // Initialize a test Description
+    Description testDesc;
+    memset(&testDesc, 0, sizeof(testDesc));
+    testDesc.state = 1;
+
+    // Set uuid field with test data
+    const char *testUuid = "123e4567-e89b-12d3-a456-426614174000";
+    memcpy(testDesc.uuid, testUuid, 37);
+
+    protos::Description protoDesc;
+    DescriptionToProto(testDesc, &protoDesc);
+
+    Description convertedDesc = DescriptionFromProto(protoDesc);
+
+    // Verify uuid field
+    EXPECT_EQ(memcmp(convertedDesc.uuid, testDesc.uuid, 37), 0);
+}
+
+TEST_F(ProtoToolsTest, DescriptionRoundTripConversion)
+{
+    // Initialize a test Description
+    Description testDesc;
+    memset(&testDesc, 0, sizeof(testDesc));
+    testDesc.state = 1;
+
+    // Set name field with test data
+    const char *testName = "test_vm_instance_001";
+    size_t nameLen = std::min(strlen(testName), static_cast<size_t>(MAX_NAME_SIZE));
+    memcpy(testDesc.name, testName, nameLen);
+
+    // Set uuid field with test data
+    const char *testUuid = "123e4567-e89b-12d3-a456-426614174000";
+    memcpy(testDesc.uuid, testUuid, 37);
+
+    // Convert to proto and back to verify data integrity
+    protos::Description protoDesc;
+    DescriptionToProto(testDesc, &protoDesc);
+
+    Description convertedDesc = DescriptionFromProto(protoDesc);
+
+    // Verify all fields match
+    EXPECT_EQ(convertedDesc.state, testDesc.state);
+    EXPECT_EQ(memcmp(convertedDesc.name, testDesc.name, MAX_NAME_SIZE), 0);
+    EXPECT_EQ(memcmp(convertedDesc.uuid, testDesc.uuid, 37), 0);
+}
+
+TEST_F(ProtoToolsTest, EmptyDescriptionConversion)
+{
+    Description emptyDesc;
+    memset(&emptyDesc, 0, sizeof(emptyDesc));
+
+    protos::Description protoDesc;
+    DescriptionToProto(emptyDesc, &protoDesc);
+
+    Description convertedDesc = DescriptionFromProto(protoDesc);
+
+    // Verify all fields are zero
+    EXPECT_EQ(convertedDesc.state, 0);
+
+    // Verify name field is empty
+    for (int i = 0; i < MAX_NAME_SIZE; i++) {
+        EXPECT_EQ(convertedDesc.name[i], 0);
+    }
+
+    // Verify uuid field is empty
+    for (int i = 0; i < 37; i++) {
+        EXPECT_EQ(convertedDesc.uuid[i], 0);
+    }
+}
+
+TEST_F(ProtoToolsTest, DescriptionWithPartialName)
+{
+    Description partialDesc;
+    memset(&partialDesc, 0, sizeof(partialDesc));
+
+    // Set only first part of name field
+    const char *partialName = "partial";
+    memcpy(partialDesc.name, partialName, strlen(partialName));
+    partialDesc.state = 2;
+
+    protos::Description protoDesc;
+    DescriptionToProto(partialDesc, &protoDesc);
+
+    Description convertedDesc = DescriptionFromProto(protoDesc);
+
+    // Verify state field
+    EXPECT_EQ(convertedDesc.state, 2);
+
+    // Verify name field is preserved correctly
+    EXPECT_EQ(memcmp(convertedDesc.name, partialName, strlen(partialName)), 0);
+
+    // Verify remaining part of name field is still zero
+    for (size_t i = strlen(partialName); i < MAX_NAME_SIZE; i++) {
+        EXPECT_EQ(convertedDesc.name[i], 0);
+    }
+}
+
 } // namespace virtrust

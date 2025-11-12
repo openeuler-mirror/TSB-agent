@@ -167,7 +167,7 @@ TEST_F(GrpcClientTest, RpcClientSendVRsourceData)
 
     // Set up a basic request
     request.set_uuid("test-uuid");
-    request.set_data("test-vr-data");
+    request.set_cipherdata("test-vr-data");
 
     // This will fail because there's no server running, but we can test the request construction
     // and error handling

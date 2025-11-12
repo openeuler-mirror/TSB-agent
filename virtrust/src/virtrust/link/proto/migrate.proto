@@ -79,8 +79,9 @@ message StartMigReply {
 }
 
 message VRsourceInfoRequest{
-   bytes data = 1;
+   bytes cipherData = 1;
    string uuid = 2;
+   Description vtpcmInfo = 3;
 }
 
 message  VRsourceInfoReply{
@@ -157,4 +158,11 @@ message TrustReportContentNew {
 message TrustReportNew {
   TrustReportContentNew content = 1;
   bytes append_data = 2; // MAX_TRUST_REPORT_APPENDDATA (50KB)
+}
+
+// VTPCM description structure
+message Description {
+  int32 state = 1;    // 启动，挂起等状态
+  bytes name = 2;     // 名称，创建时有hw设置 (255 bytes)
+  bytes uuid = 3;     // 虚拟机的uuid (37 bytes)
 }

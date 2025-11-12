@@ -70,6 +70,8 @@ VirtrustRc DomainDestroy(const std::unique_ptr<ConnCtx> &conn, const std::string
 
 ### 3. DomainMigrate - 迁移虚拟机
 
+将虚拟机迁移到其他主机。当前仅支持离线迁移，虚拟机在 running/shut-off 状态下，非共享存储需要用户手动复制磁盘文件，例如 qcow2 到目的端口，目标存在同名运行的虚拟机情况下不能迁移，可配置源虚拟机是否删除，重复迁移会覆盖目标端虚拟机。
+
 ```cpp
 VirtrustRc DomainMigrate(const std::unique_ptr<ConnCtx> &conn, const std::string &domainName,
                          const std::string &destUri, unsigned int flags = 0);
@@ -113,7 +115,9 @@ VirtrustRc DomainStart(const std::unique_ptr<ConnCtx> &conn, const std::string &
 
 **注意事项**：
 - 当使用 `--only-tsb/isOnlyTsb` 选项时，入参 `domainName` 应传入对应虚拟机的 `uuid`
-- domainName 长度为 [1, 200]
+- `domainName` 长度为 [1, 200]
+- `desturi` 为目标端 uri，格式为 `<protocol>://<hostip>:<port>/<path>`，如 `qemu+tls://<destip>/system`
+
 
 ### 5. DomainUndefine - 删除虚拟机
 

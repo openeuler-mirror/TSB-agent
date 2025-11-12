@@ -50,8 +50,10 @@ grpc::Status MigrationServiceImpl::PrepareMigration(grpc::ServerContext *context
     auto &domainName = request->domainname();
     auto &mgr = SessionManager::GetInstance();
 
-    // 已存在session，说明正在迁移
-    if (mgr.GetSession(uuid) != nullptr) {
+    // 否则创建session
+    MigrationSession *session = mgr.CreateSession(MigrationSession::Role::Responder, uuid, request->domainname(),
+                                                  request->desturi(), request->localuri(), request->flags());
+    if (session == nullptr) { // already exists or failed
         VIRTRUST_LOG_ERROR(
             "|PrepareMigration|END|returnF|domain name: {}|Session already exists, this VM is already migrating",
             domainName);
@@ -59,9 +61,6 @@ grpc::Status MigrationServiceImpl::PrepareMigration(grpc::ServerContext *context
         return grpc::Status::OK;
     }
 
-    // 否则创建session
-    MigrationSession *session = mgr.CreateSession(MigrationSession::Role::Responder, uuid, request->domainname(),
-                                                  request->desturi(), request->localuri(), request->flags());
     MigrateSessionRc rc = session->OnMigrateRequestReceived();
     if (rc != MigrateSessionRc::OK) {
         response->set_result(1);
@@ -189,9 +188,8 @@ grpc::Status MigrationServiceImpl::DomainMigrate(grpc::ServerContext *context,
         response->set_result(1);
         return grpc::Status::OK;
     }
-    LinkConfig config;
+    LinkConfig config = ConfigMgr::Instance().GetLinkConfig();
     config.ip = destIp;
-    config.port = LIBVIRTRUSTD_SERVER_PORT;
     RpcClient client(config);
 
     auto &mgr = SessionManager::GetInstance();
@@ -206,6 +204,7 @@ grpc::Status MigrationServiceImpl::DomainMigrate(grpc::ServerContext *context,
     session->SetRpcClient(std::make_unique<RpcClient>(config));
     // 启动状态机（内部会依次调用 Prepare/Exchange/Start）
     auto ret = session->Start();
+    session->Cleanup();
     if (ret != MigrateSessionRc::OK) {
         response->set_result(1);
         return grpc::Status::OK;
