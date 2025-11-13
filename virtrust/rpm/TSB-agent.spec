@@ -119,7 +119,3 @@ fi
 /sbin/ldconfig
 
 %changelog
-* Tue Nov 04 2025 TSB Team <tsb@example.com> - 1.0.0-1
-- Initial RPM for TSB-agent
-- Build via CMake, install daemon, CLI and shared lib
-- Add systemd unit for libvirtrustd
