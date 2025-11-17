@@ -161,7 +161,7 @@ inline std::vector<std::string> ExtractStringsFromBinary(std::string_view conten
     }
 
     if (cur.size() >= minLen) {
-        out.push_back(std::move(cur));
+        out.emplace_back(cur);
     }
 
     return out;
