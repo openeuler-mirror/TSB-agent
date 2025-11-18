@@ -40,7 +40,8 @@ libvirt 虚拟化层
 - **权限**：需要足够的权限来管理虚拟机
 - **依赖**：libvirt、gRPC 相关库
 
-### 安装步骤
+
+### 源码安装步骤
 
 1. **编译安装**：
 ```bash
@@ -55,7 +56,7 @@ sudo cmake --install build
 2. **创建配置文件**：
 ```bash
 sudo mkdir -p /etc/virtrust
-sudo cp config-example.json /etc/virtrust/virtrustd.json
+sudo cp test/data/config.json /etc/virtrust/config.json
 ```
 
 3. **创建日志目录**：
@@ -65,22 +66,35 @@ sudo touch /var/log/virtrustd.log
 sudo chmod 644 /var/log/virtrustd.log
 ```
 
-## 配置管理
-
-### 基本语法
-
-```bash
-virtrustd --config <config_file> [options]
+### RPM 部署
+1. **构建 RPM 包**
+```shell
+sh rpm/build_rpm.sh
 ```
+2. **安装**
+```shell
+sudo rpm -ivh ~/rpmbuild/RPMS/aarch64/TSB-agent-1.0.0-1.aarch64.rpm
+```
+安装完成后，可在以下位置找到可执行文件、头文件、库文件和配置文件：
+```shell
+# 可执行文件
+/usr/bin/libvirtrustd
+/usr/bin/virtrust-sh
 
-### 命令行选项
+# 头文件目录
+/usr/include/virtrust/
 
-| 选项 | 长选项 | 参数 | 描述 |
-|------|--------|------|------|
-| 无 | `--config` | 文件路径 | 配置文件路径（必需） |
-| `-d` | `--debug` | 无 | 启用调试模式 |
-| 无 | `--help` | 无 | 显示帮助信息 |
-| 无 | `--version` | 无 | 显示版本信息 |
+# 库文件
+/usr/lib64/libvirtrust-shared.so
+
+# 示例配置文件
+/etc/virtrust/config.json
+```
+3. **卸载**
+```shell
+rpm -e TSB-agent
+```
+## 配置管理
 
 ### 配置文件格式
 
@@ -91,8 +105,7 @@ virtrustd --config <config_file> [options]
     "caPath": "ca-cert.pem",
     "certPath": "server-cert.pem",
     "skPath": "server-sk.pem",
-    "ip": "127.0.0.1",
-    "udsPath": "/tmp/grpc.sock"
+    "ip": "127.0.0.1"
 }
 ```
 
@@ -102,7 +115,6 @@ virtrustd --config <config_file> [options]
 - `cert_path`：服务器证书文件路径
 - `sk_path`：服务器私钥文件路径，默认为 "server-sk.pem"
 - `ip`：服务器监听地址，默认为 "127.0.0.1"
-- `uds_path`：Unix Domain Socket 路径，默认为 "/tmp/grpc.sock"
 
 ## 运行和管理
 
@@ -115,6 +127,15 @@ sudo virtrustd --config /etc/virtrust/virtrustd.json
 # 调试模式启动
 sudo virtrustd --config /etc/virtrust/virtrustd.json --debug
 ```
+
+### 命令行选项
+
+| 选项 | 长选项 | 参数 | 描述 |
+|------|--------|------|------|
+| 无 | `--config` | 文件路径 | 配置文件路径（必需） |
+| `-d` | `--debug` | 无 | 启用调试模式 |
+| 无 | `--help` | 无 | 显示帮助信息 |
+| 无 | `--version` | 无 | 显示版本信息 |
 
 ### 系统服务配置
 
@@ -267,3 +288,9 @@ sudo firewall-cmd --permanent --add-port=5031/tcp
 sudo firewall-cmd --permanent --add-port=16514/tcp
 sudo firewall-cmd --reload
 ```
+
+### 通信矩阵
+| Source Device | Source IP      | Source Port | Destination Device | Destination IP      | Destination Port | Protocol | Is Listening Port Configurable | Authentication | Encryption  |
+| ------------- | -------------- |-------------| ------------------ | ------------------- | ---------------- | -------- | ------------------------------ | -------------- | ----------- |
+| Source Node   | Source host IP | Random port allocated by the system     | Destination Node   | Destination host IP | 5031             | TCP      | No                             | Certificate    | TLS 1.2/1.3 |
+| Source Node   | Source host IP | Random port allocated by the system     | Destination Node   | Destination host IP | 16514            | TCP      | Yes                            | Certificate    | TLS 1.2/1.3 |
