@@ -221,10 +221,16 @@ bool CheckGuestBeforeStart(std::string_view domainName, std::string &uuid)
     // 检查度量值是否通过
     auto tsbRc = CheckMeasure(uuid.data(), bios, shim, grub, grubCfg, kernel, initrd);
     FreeMeasureInfo(bios, shim, grub, grubCfg, kernel, initrd);
-    if (tsbRc != 0) {
-        VIRTRUST_LOG_ERROR("CheckMeasure failed:{}", domainName);
+
+    if (tsbRc == IMPORT_FAILURE) {
+        VIRTRUST_LOG_ERROR("|CheckGuestBeforeStart|End|returnF|domainName:{}|CheckMeasure: import failed", domainName);
         return false;
     }
+    if (tsbRc == CHECK_FAILURE) {
+        VIRTRUST_LOG_ERROR("|CheckGuestBeforeStart|End|returnF|domainName:{}|CheckMeasure: verify failed", domainName);
+        return false;
+    }
+
     return true;
 }
 
