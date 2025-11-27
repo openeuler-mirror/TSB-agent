@@ -206,6 +206,9 @@ MigrateSessionRc MigrationSession::OnStartMigrationResponseReceived()
         VIRTRUST_LOG_ERROR(
             "|OnStartMigrationResponseReceived|END|returnF|domain name: {}|MigrationGetVRootCipher failed.",
             domainName_);
+        if (ret == ERR_VM_NOT_STARTED) {
+            VIRTRUST_LOG_ERROR("call MigrationGetVRootCipher failed: the VM has not been started yet.");
+        }
         OnFail();
         return MigrateSessionRc::ERROR;
     }
@@ -739,6 +742,7 @@ MigrateSessionRc MigrationSession::OnTransferDataRequestReceived(const protos::V
     // 导入服务端发来的虚拟机描述信息 校验秘钥成功才导入
     auto protosDesc = request->vtpcminfo();
     auto vmInfo = DescriptionFromProto(protosDesc);
+    vmInfo.state = VM_SHUTUP;
     ret = CreateVRoot(&vmInfo);
     if (ret != 0) {
         result = ret;

@@ -60,11 +60,17 @@ enum EnDirection {
     EN_DIRECTION_MAX,
 };
 
-enum CheckMeasureRc {
-    IMPORT_SUCCESS = 1,
-    CHECK_SUCCESS,
-    IMPORT_FAILURE,
-    CHECK_FAILURE,
+enum EN_STATE {
+    VM_SHUTUP = 0,      // 虚机停止状态，Description.state状态码
+    VM_RUNNING,         // 虚机运行状态
+    VM_MIGRATION,       // 虚机迁移状态
+
+    IMPORT_BM_SUCCESS,  // 基线值设置成功，CheckMeasure返回值
+    CHECK_BM_SUCCESS,   // 基线值校验成功，CheckMeasure返回值
+    IMPORT_BM_FAILURE,  // 基线值设置失败，CheckMeasure返回值
+    CHECK_BM_FAILURE,   // 基线值校验失败，CheckMeasure返回值
+
+    ERR_VM_NOT_STARTED, // 虚机未启动错误，MigrationGetVrootCipher 返回值
 };
 
 struct Description {
