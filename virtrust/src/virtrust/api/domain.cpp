@@ -61,8 +61,7 @@ VirtrustRc GetVirshMeasureSummary(virtrust::ForeignMounter &mounter, virtrust::V
         return VirtrustRc::ERROR;
     }
 
-    // FIXME: get bios version
-    measureSummary.bios.version_ = "0.0.0";
+    measureSummary.bios.version_ = config.GetBiosVersion();
     measureSummary.bios.content_ = std::string(reinterpret_cast<const char *>(loaderSm3.data()), loaderSm3.size());
     // grubcfg需要提供文件内容 而不是摘要
     std::string grubCfgContent;
@@ -87,7 +86,7 @@ VirtrustRc GetVirshMeasureSummary(virtrust::ForeignMounter &mounter, virtrust::V
         VIRTRUST_LOG_ERROR("|GetVirshMeasureSummary|END|returnF||do sm3 by file failed: {}", config.GetGrubPath());
         return VirtrustRc::ERROR;
     }
-    // FIXME: get grub version
+    measureSummary.grub.version_ = config.GetGrubVersion(mounter);
     measureSummary.grub.content_ = std::string(reinterpret_cast<const char *>(grubSm3.data()), grubSm3.size());
 
     std::vector<uint8_t> initrdSm3(Sm3::DigestSize(), 0);
