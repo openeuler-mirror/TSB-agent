@@ -154,21 +154,24 @@ bool ConvertTsbStruct(const VirshMeasureInfo &src, struct MeasureInfo *&target)
         VIRTRUST_LOG_ERROR("malloc failed:{},size:{}", src.name_, totalSize);
         return false;
     }
-    if (memcpy_s(target->uuid, sizeof(target->uuid) - 1, src.uuid_.data(), src.uuid_.size()) != EOK) {
+    // must ensure char array ends with '\0'
+    if (memcpy_s(target->uuid, sizeof(target->uuid), src.uuid_.c_str(), src.uuid_.size() + 1) != EOK) {
         VIRTRUST_LOG_ERROR("memcpy uuid to tsb struct failed:{},uuidSize:{}", src.name_, sizeof(target->uuid));
         return false;
     }
+    // content has its size filed
     target->size = contentSize;
-
-    if (memcpy_s(target->content, contentSize, src.content_.data(), contentSize) != EOK) {
+    if (memcpy_s(target->content, contentSize, src.content_.c_str(), contentSize) != EOK) {
         VIRTRUST_LOG_ERROR("memcpy content to tsb struct failed:{},contentSize:{}", src.name_, contentSize);
         return false;
     }
-    if (memcpy_s(target->name, sizeof(target->name) - 1, src.name_.data(), src.name_.size()) != EOK) {
+    // must ensure char array ends with '\0'
+    if (memcpy_s(target->name, sizeof(target->name), src.name_.c_str(), src.name_.size() + 1) != EOK) {
         VIRTRUST_LOG_ERROR("memcpy name to tsb struct failed:{}", src.name_);
         return false;
     }
-    if (memcpy_s(target->version, sizeof(target->version) - 1, src.version_.data(), src.version_.size()) != EOK) {
+    // must ensure char array ends with '\0'
+    if (memcpy_s(target->version, sizeof(target->version), src.version_.c_str(), src.version_.size() + 1) != EOK) {
         VIRTRUST_LOG_ERROR("memcpy version to tsb struct failed:{},version:{}", src.name_, src.version_);
         return false;
     }
