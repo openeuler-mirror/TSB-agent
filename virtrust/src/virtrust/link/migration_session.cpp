@@ -18,6 +18,10 @@
 namespace virtrust {
 
 namespace {
+// RPC timeout unit: seconds
+constexpr uint32_t RPC_SIGNAL_TIMEOUT   = 5;
+constexpr uint32_t RPC_TRANSFER_TIMEOUT = 10;
+
 unsigned int GetFlagCleard(const unsigned int &flags, const unsigned int &clear)
 {
     return flags & ~clear;
@@ -94,7 +98,7 @@ MigrateSessionRc MigrationSession::SendMigrateRequest()
 
     protos::PrepareMigReply reply;
 
-    int32_t rc = rpcClient_->PrepareMigration(5, req, &reply);
+    int32_t rc = rpcClient_->PrepareMigration(RPC_SIGNAL_TIMEOUT, req, &reply);
     bool ok = (rc == 0 && reply.result() == 0);
 
     if (!ok) {
@@ -125,7 +129,7 @@ MigrateSessionRc MigrationSession::SendExchangeKey()
     }
 
     protos::EXchangePkAndReportReply res;
-    int32_t ret = rpcClient_->ExchangePkAndReport(5, req, &res);
+    int32_t ret = rpcClient_->ExchangePkAndReport(RPC_TRANSFER_TIMEOUT, req, &res);
     if (ret != 0 || res.result() != 0) {
         VIRTRUST_LOG_ERROR("|SendExchangeKey|END|returnF|domain name: {}|Exchange cert and report failed.",
                            domainName_);
@@ -179,7 +183,7 @@ MigrateSessionRc MigrationSession::SendStartMigration()
     req.set_uuid(sessionId_);
 
     protos::StartMigReply res;
-    int32_t ret = rpcClient_->StartMigration(5, req, &res);
+    int32_t ret = rpcClient_->StartMigration(RPC_SIGNAL_TIMEOUT, req, &res);
     if (ret != 0) {
         VIRTRUST_LOG_ERROR("|SendStartMigration|END|returnF|domain name: {}|Send start migration signal failed.",
                            domainName_);
@@ -249,7 +253,7 @@ MigrateSessionRc MigrationSession::SendTransferOnce(const std::string &cipher, c
     DescriptionToProto(vmInfo, protosDesc);
 
     protos::VRsourceInfoReply res;
-    int32_t ret = rpcClient_->SendVRsourceData(5, req, &res);
+    int32_t ret = rpcClient_->SendVRsourceData(RPC_TRANSFER_TIMEOUT, req, &res);
     // 传输数据失败
     if (ret != 0) {
         VIRTRUST_LOG_ERROR("|SendTransferOnce|END|returnF||failed to tansfer data for: {}, ret {}.", domainName_, ret);
@@ -308,7 +312,7 @@ MigrateSessionRc MigrationSession::SendFinishedNotify(bool success)
     req.set_result(success ? 0 : 1);
     req.set_uuid(sessionId_);
     protos::MigrateResultReply res;
-    auto ret = rpcClient_->NotifyVRMigrateResult(5, req, &res);
+    auto ret = rpcClient_->NotifyVRMigrateResult(RPC_SIGNAL_TIMEOUT, req, &res);
     if (ret != 0) {
         VIRTRUST_LOG_ERROR("|SendFinishedNotify|END|returnF|domain name: {}|Send notify failed.", domainName_);
         return MigrateSessionRc::ERROR;
