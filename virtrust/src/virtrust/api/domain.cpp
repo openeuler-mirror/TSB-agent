@@ -540,11 +540,11 @@ bool ConsistencyCheck(const std::unordered_map<std::string, Description> &tsbVmM
             errMap.emplace(
                 tsb.first,
                 std::make_pair(LogLevel::ERROR,
-                               fmt::format("Inconsistent vm (tsb uuid:{}, name {}) "
-                                           "its data is inconsistent with tsb, consider update this "
-                                           "instance by \"virsh start/destroy DOMAIN_NAME\", or \"virtrust-sh "
+                               fmt::format("Inconsistent vm (tsb uuid:{}, name {}), "
+                                           "its state in the TSB is {}, but its actual state is {}. Consider update "
+                                           "this instance by \"virsh start/destroy DOMAIN_NAME\", or \"virtrust-sh "
                                            "start/destroy --only-tsb DOMAIN_UUID\".",
-                                           tsb.first, tsb.second.name)));
+                                           tsb.first, tsb.second.name, tsb.second.state, virtIter->second.state)));
             out = false;
             continue;
         }

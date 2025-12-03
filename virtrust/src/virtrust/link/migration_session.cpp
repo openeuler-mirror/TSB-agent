@@ -770,10 +770,10 @@ MigrateSessionRc MigrationSession::OnTransferDataRequestReceived(const protos::V
     }
     VIRTRUST_LOG_DEBUG("|domain name: {}|TSB: MigrationImportVrootCipher success.", domainName_);
 
-    // 导入服务端发来的虚拟机描述信息 校验秘钥成功才导入
+    // 导入服务端发来的虚拟机描述信息
     auto protosDesc = request->vtpcminfo();
     auto vmInfo = DescriptionFromProto(protosDesc);
-    vmInfo.state = VM_SHUTUP;
+    vmInfo.state = VIR_DOMAIN_SHUTOFF;
     VIRTRUST_LOG_DEBUG("|domain name: {}|TSB: CreateVRoot start", domainName_);
     ret = CreateVRoot(&vmInfo);
     if (ret != 0) {
