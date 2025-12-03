@@ -20,7 +20,7 @@ namespace virtrust {
 namespace {
 // RPC timeout unit: seconds
 constexpr uint32_t RPC_SIGNAL_TIMEOUT   = 5;
-constexpr uint32_t RPC_TRANSFER_TIMEOUT = 10;
+constexpr uint32_t RPC_TRANSFER_TIMEOUT = 20;
 
 unsigned int GetFlagCleard(const unsigned int &flags, const unsigned int &clear)
 {
