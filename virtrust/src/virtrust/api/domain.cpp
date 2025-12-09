@@ -461,7 +461,6 @@ VirtrustRc UndefineTsbResource(const std::string &domainName)
     int tsbVmNum = 0;
     Description *tsbVmInfo = nullptr;
 
-    std::unordered_set<std::string> tsbVmNames; // 存放tsb查询到的虚机名称
     int result = GetVRoots(&tsbVmNum, &tsbVmInfo);
     if (result != 0 || tsbVmNum < 0) {
         VIRTRUST_LOG_ERROR("|DomainUndefine UndefineTsbResource|END|returnF||failed to get tsb "
@@ -635,10 +634,6 @@ VirtrustRc DomainCreate(const std::unique_ptr<ConnCtx> &conn, const std::vector<
     if (!fileLock.IsLocked()) {
         return VirtrustRc::ERROR;
     }
-    if (conn == nullptr) {
-        VIRTRUST_LOG_ERROR("|DomainCreate|END|returnF||conn is nullptr");
-        return VirtrustRc::ERROR;
-    }
     if (CheckMaxDomainCount() != VirtrustRc::OK) {
         return VirtrustRc::ERROR;
     }
@@ -708,10 +703,6 @@ VirtrustRc DomainDestroy(const std::unique_ptr<ConnCtx> &conn, const std::string
     if (!fileLock.IsLocked()) {
         return VirtrustRc::ERROR;
     }
-    if (conn == nullptr) {
-        VIRTRUST_LOG_ERROR("|DomainDestroy|END|returnF||conn is nullptr");
-        return VirtrustRc::ERROR;
-    }
 
     if (isOnlyTsb) {
         if (domainName.size() != 36) { // UUID长度为36
@@ -765,10 +756,6 @@ VirtrustRc DomainList(const std::unique_ptr<ConnCtx> &conn, unsigned int flags,
                            "see DomainListFlags.");
         return VirtrustRc::ERROR;
     }
-    if (conn == nullptr) {
-        VIRTRUST_LOG_ERROR("|DomainList|END|returnF||conn is nullptr");
-        return VirtrustRc::ERROR;
-    }
     domainInfos.clear();
 
     int tsbVmNum = 0;
@@ -779,7 +766,7 @@ VirtrustRc DomainList(const std::unique_ptr<ConnCtx> &conn, unsigned int flags,
         return VirtrustRc::ERROR;
     }
 
-    virDomainPtr *virtVmInfo;
+    virDomainPtr *virtVmInfo = nullptr;
     int virtVmNum = Libvirt::GetInstance().virConnectListAllDomains(conn->Get(), &virtVmInfo, flags);
     if (virtVmNum < 0) {
         VIRTRUST_LOG_ERROR("|DomainList|END|returnF||failed to get virsh domains");
@@ -965,10 +952,6 @@ VirtrustRc DomainUndefine(const std::unique_ptr<ConnCtx> &conn, const std::strin
     }
     FileLock fileLock(LOCK_FILE);
     if (!fileLock.IsLocked()) {
-        return VirtrustRc::ERROR;
-    }
-    if (conn == nullptr) {
-        VIRTRUST_LOG_ERROR("|DomainUndefine|END|returnF||conn is nullptr");
         return VirtrustRc::ERROR;
     }
     if (isOnlyTsb) {

@@ -96,7 +96,7 @@ protected:
     {
         libptr_ = dlopen(libName_.data(), RTLD_NOW | RTLD_GLOBAL);
         if (libptr_ == nullptr) {
-            throw std::runtime_error(std::string(dlerror()));
+            return DllibRc::ERROR;
         }
         return DllibRc::OK;
     }

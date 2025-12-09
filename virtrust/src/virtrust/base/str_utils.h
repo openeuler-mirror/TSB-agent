@@ -4,14 +4,19 @@
 
 #pragma once
 
+#include <cstring>
 #include <fstream>
 #include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
+#include <cctype>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <limits.h>
 
 namespace virtrust {
-
+constexpr  uint32_t MAX_FILE_SIZE = 5 * 1024 * 1024;
 inline void MakeStringInternal(std::stringstream &)
 {}
 
@@ -136,9 +141,72 @@ inline bool StartsWithIgnoreSpaces(const std::string &str, std::string_view pref
     return str.substr(start).find(prefix) == 0;
 }
 
+    inline  bool Exist(std::string &filePath, const int &mode) {
+    return access(filePath.c_str(), mode) != -1;
+}
+
+    inline bool IsAbsolutePath(std::string &filePath) {
+    if (filePath.length() == 0) {
+        return false;
+    }
+
+    if (filePath[0] == '/') {
+        return false;
+    }
+
+    if (strstr(filePath.c_str(), "/../") != nullptr || strstr(filePath.c_str(), "/./") != nullptr) {
+        return false;
+    }
+    return true;
+}
+
+    bool CanonicalPath(std::string filePath) {
+    if (filePath.empty() || filePath.size() > PATH_MAX) {
+        return false;
+    }
+    char pathBuf[PATH_MAX + 1] = {0};
+    if (realpath(filePath.c_str(), pathBuf) == nullptr) {
+        return false;
+    }
+    filePath = pathBuf;
+    return true;
+}
+
+    bool CheckFileStat(std::string filePath) {
+    struct stat st;
+    if (stat(filePath.c_str(), &st) != 0) {
+        return false;
+    }
+
+    if ((st.st_mode & S_IFMT) != S_IFREG || st.st_size > MAX_FILE_SIZE) {
+        return false;
+    }
+    return true;
+}
+
+bool CheckFilePathValid(std::string &filePath) {
+    if (!IsAbsolutePath(filePath)) {
+        return false;
+    }
+    if (!CanonicalPath(filePath)) {
+        return false;
+    }
+    if (!CheckFileStat(filePath)) {
+        return false;
+    }
+    if (!Exist(filePath, F_OK | R_OK)) {
+        return false;
+    }
+    return true;
+}
+
 inline std::string ReadFile(const std::string &filename)
 {
-    std::ifstream file(filename);
+    std::string filePath = filename;
+    std::ifstream file(filePath);
+    if (!CheckFilePathValid(filePath)) {
+        return "";
+    }
     return {(std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>()};
 }
 

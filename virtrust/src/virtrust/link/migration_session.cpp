@@ -208,6 +208,9 @@ MigrateSessionRc MigrationSession::OnStartMigrationResponseReceived()
     VIRTRUST_LOG_DEBUG("|domain name: {}|TSB: MigrationGetVrootCipher start.", domainName_);
     auto ret = MigrationGetVrootCipher(sessionId_.data(), sessionId_.data(), &cipher, &cipherLen);
     if (ret != 0 || cipher == nullptr) {
+        if (cipher != nullptr) {
+            free(cipher);
+        }
         VIRTRUST_LOG_ERROR(
             "|OnStartMigrationResponseReceived|END|returnF|domain name: {}|TSB: MigrationGetVRootCipher failed.",
             domainName_);
@@ -333,6 +336,10 @@ MigrateSessionRc MigrationSession::GetExchangePkAndReport(protos::EXchangePkAndR
                                                           protos::EXchangePkAndReportReply *res)
 {
     VIRTRUST_LOG_DEBUG("|GetExchangePkAndReport|START|");
+    if (req == nullptr || res == nullptr) {
+        VIRTRUST_LOG_ERROR("|GetExchangePkAndReport|END|returnF|req is nullptr or res is nullptr.");
+        return MigrateSessionRc::ERROR;
+    }
     auto uuid = sessionId_;
     char *cert = nullptr;
     int certLen = 0;
@@ -342,8 +349,14 @@ MigrateSessionRc MigrationSession::GetExchangePkAndReport(protos::EXchangePkAndR
     VIRTRUST_LOG_DEBUG("|domain name: {}|TSB: MigrationGetCert start.", domainName_);
     int ret = MigrationGetCert(uuid.data(), &cert, &certLen, &pubKey, &pubKeyLen);
     if (ret != 0 || cert == nullptr || pubKey == nullptr) {
-        VIRTRUST_LOG_ERROR(
-            "|GetExchangePkAndReport|END|returnF|domain name: {}|TSB: MigrationGetCert failed.", domainName_);
+        if (cert != nullptr) {
+            free(cert);
+        }
+        if (pubKey != nullptr) {
+            free(pubKey);
+        }
+        VIRTRUST_LOG_ERROR("|GetExchangePkAndReport|END|returnF|domain name: {}|TSB: MigrationGetCert failed.",
+                           domainName_);
         return MigrateSessionRc::ERROR;
     }
     VIRTRUST_LOG_DEBUG("|domain name: {}|TSB: MigrationGetCert success.", domainName_);
@@ -446,6 +459,10 @@ MigrateSessionRc MigrationSession::MigrateByLibvirt()
     auto domain = std::make_unique<DomainCtx>(localConn, domainName_);
     if (domain->Get() == nullptr) {
         VIRTRUST_LOG_ERROR("|MigrateByLibvirt|END|returnF||failed to find domain: {}", domainName_);
+        return MigrateSessionRc::ERROR;
+    }
+    if (destConn->Get() == nullptr) {
+        VIRTRUST_LOG_ERROR("|MigrateByLibvirt|END|returnF||failed to find desturl: {}", destUri_);
         return MigrateSessionRc::ERROR;
     }
     auto *domainPtr = libvirt.virDomainMigrate3(domain->Get(), destConn->Get(), nullptr, 0,
@@ -578,8 +595,10 @@ MigrateSessionRc MigrationSession::ExportTcm2Key(std::string &tcm2Key)
     VIRTRUST_LOG_DEBUG("|domain name: {} |TSB: TransDupPub export start.", domainName_);
     auto ret = TransDupPub(EN_EXPORT, nullptr, &key, &keyLen, nullptr, 0);
     if (ret != 0 || key == nullptr || keyLen <= 0) {
-        VIRTRUST_LOG_ERROR(
-            "|ExportTcm2Key|END|returnF|domain name: {} |TSB: TransDupPub export failed.", domainName_);
+        if (key != nullptr) {
+            free(key);
+        }
+        VIRTRUST_LOG_ERROR("|ExportTcm2Key|END|returnF|domain name: {} |TSB: TransDupPub export failed.", domainName_);
         return MigrateSessionRc::ERROR;
     }
     VIRTRUST_LOG_DEBUG("|domain name: {} |TSB: TransDupPub export success.", domainName_);

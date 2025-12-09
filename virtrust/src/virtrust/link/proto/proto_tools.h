@@ -8,6 +8,9 @@
 namespace virtrust {
 static void ReportToProto(const trust_report_new &report, protos::TrustReportNew *protoReport)
 {
+    if (protoReport == nullptr) {
+        return ;
+    }
     // 转换 content
     auto *content = protoReport->mutable_content();
     content->set_be_host_report_time(report.content.be_host_report_time);
@@ -96,7 +99,6 @@ static trust_report_new ReportFromProto(const protos::TrustReportNew &protoRepor
 {
     trust_report_new report;
     memset(&report, 0, sizeof(report));
-
     const auto &content = protoReport.content();
 
     // 转换基本字段
@@ -193,6 +195,9 @@ static trust_report_new ReportFromProto(const protos::TrustReportNew &protoRepor
 
 static void DescriptionToProto(const Description &desc, protos::Description *protoDesc)
 {
+    if (protoDesc == nullptr) {
+        return ;
+    }
     protoDesc->set_state(desc.state);
 
     // Convert name to string, only copying actual data length (ignoring null padding)

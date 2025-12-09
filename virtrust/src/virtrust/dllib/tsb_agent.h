@@ -9,8 +9,9 @@
 #include <cstdint>
 #include <string_view>
 
-#include "virtrust/dllib/common.h"
 #include "tsb_agent/tsb_agent.h" // for structs and function prototypes
+
+#include "virtrust/dllib/common.h"
 
 namespace virtrust {
 
@@ -43,23 +44,13 @@ public:
     DlFun<int, char *> StopVRoot;
     DlFun<int, char *> RemoveVRoot;
 
-    DlFun<int,
-          char *,
-          struct MeasureInfo *,
-          struct MeasureInfo *,
-          struct MeasureInfo *,
-          struct MeasureInfo *,
-          struct MeasureInfo *,
-          struct MeasureInfo *> UpdateMeasure;
+    DlFun<int, char *, struct MeasureInfo *, struct MeasureInfo *, struct MeasureInfo *, struct MeasureInfo *,
+          struct MeasureInfo *, struct MeasureInfo *>
+        UpdateMeasure;
 
-    DlFun<int,
-          char *,
-          struct MeasureInfo *,
-          struct MeasureInfo *,
-          struct MeasureInfo *,
-          struct MeasureInfo *,
-          struct MeasureInfo *,
-          struct MeasureInfo *> CheckMeasure;
+    DlFun<int, char *, struct MeasureInfo *, struct MeasureInfo *, struct MeasureInfo *, struct MeasureInfo *,
+          struct MeasureInfo *, struct MeasureInfo *>
+        CheckMeasure;
 
     DlFun<int, char *, char *, struct trust_report_new *, struct trust_report_new *> GetReport;
     DlFun<int, char *, char *, struct trust_report_new *, struct trust_report_new *> VerifyTrustReport;
@@ -110,4 +101,3 @@ private:
 };
 
 } // namespace virtrust
-
