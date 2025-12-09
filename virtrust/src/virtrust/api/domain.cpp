@@ -463,8 +463,7 @@ VirtrustRc UndefineTsbResource(const std::string &domainName)
 
     std::unordered_set<std::string> tsbVmNames; // 存放tsb查询到的虚机名称
     int result = GetVRoots(&tsbVmNum, &tsbVmInfo);
-    if (result != 0) {
-
+    if (result != 0 || tsbVmNum < 0) {
         VIRTRUST_LOG_ERROR("|DomainUndefine UndefineTsbResource|END|returnF||failed to get tsb "
                            "domains");
         return VirtrustRc::ERROR;
@@ -611,12 +610,12 @@ VirtrustRc CheckMaxDomainCount()
 {
     int tsbVmNum = 0;
     Description *tsbVmInfo = nullptr;
-    int result = GetVRoots(&tsbVmNum, &tsbVmInfo);
-    if (result != 0) {
+    int ret = GetVRoots(&tsbVmNum, &tsbVmInfo);
+    if (ret != 0 || tsbVmNum < 0) {
         VIRTRUST_LOG_ERROR("|CheckMaxDomainCount|END|returnF||Failed to get tsb domains");
         return VirtrustRc::ERROR;
     }
-    if (tsbVmNum >= MAX_DOMAIN_COUNT) {
+    if (static_cast<uint32_t>(tsbVmNum) >= MAX_DOMAIN_COUNT) {
         FreeDescription(&tsbVmInfo);
         VIRTRUST_LOG_ERROR("|CheckMaxDomainCount|END|returnF||support max domain count is: {}", MAX_DOMAIN_COUNT);
         return VirtrustRc::ERROR;
@@ -774,8 +773,8 @@ VirtrustRc DomainList(const std::unique_ptr<ConnCtx> &conn, unsigned int flags,
 
     int tsbVmNum = 0;
     Description *tsbVmInfo = nullptr;
-    if (GetVRoots(&tsbVmNum, &tsbVmInfo) != 0) {
-
+    int ret = GetVRoots(&tsbVmNum, &tsbVmInfo);
+    if (ret != 0 || tsbVmNum < 0) {
         VIRTRUST_LOG_ERROR("|DomainList|END|returnF||failed to get tsb domains");
         return VirtrustRc::ERROR;
     }
