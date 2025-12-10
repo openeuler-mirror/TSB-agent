@@ -2,16 +2,17 @@
  * Copyright (C) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
  */
 
-#include <cstring>
-#include <string>
 #include <securec.h>
+
+#include <cstring>
+#include <iostream>
+#include <ostream>
+#include <string>
+
 #include "gtest/gtest.h"
 #include "tsb_agent/tsb_agent.h"
 
 #include "virtrust/link/proto/proto_tools.h"
-
-#include <iostream>
-#include <ostream>
 
 #include "virtrust/link/proto/migrate.pb.h"
 
@@ -529,7 +530,7 @@ TEST_F(ProtoToolsTest, DescriptionWithPartialName)
     DescriptionToProto(partialDesc, &protoDesc);
 
     Description convertedDesc;
-    DescriptionFromProto(protoDesc,convertedDesc);
+    DescriptionFromProto(protoDesc, convertedDesc);
 
     // Verify state field
     EXPECT_EQ(convertedDesc.state, 2);
