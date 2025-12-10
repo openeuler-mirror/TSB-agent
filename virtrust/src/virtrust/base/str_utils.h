@@ -64,6 +64,9 @@ template <> inline std::string MakeString(const std::string &args)
 
 inline std::string MakeString(const char *cstr)
 {
+    if (cstr == nullptr) {
+        return "";
+    }
     return {cstr};
 }
 

@@ -799,6 +799,12 @@ VirtrustRc DomainList(const std::unique_ptr<ConnCtx> &conn, unsigned int flags,
     }
     FreeDescription(&tsbVmInfo);
     if (virtVmInfo != nullptr) {
+        for (int i = 0; i < virtVmNum; i++) {
+            if (virtVmInfo[i] != nullptr) {
+                Libvirt::GetInstance().virDomainFree(virtVmInfo[i]);
+                virtVmInfo[i] = nullptr;
+            }
+        }
         free(virtVmInfo);
     }
     VIRTRUST_LOG_DEBUG("|DomainList|END|returnS||list domain success");
@@ -817,9 +823,9 @@ VirtrustRc DomainMigrate(const std::unique_ptr<ConnCtx> &conn, const std::string
     if (!fileLock.IsLocked()) {
         return VirtrustRc::ERROR;
     }
-    // 默认离线迁移且删除源端虚机
-    flags |= VIR_MIGRATE_OFFLINE | VIR_MIGRATE_PERSIST_DEST;
-    if (flags != (VIR_MIGRATE_OFFLINE | VIR_MIGRATE_PERSIST_DEST | MIGRATE_UNDEFINE_SOURCE)) {
+    flags |= VIR_MIGRATE_OFFLINE | VIR_MIGRATE_PERSIST_DEST; // 默认离线迁移 离线迁移必须指定VIR_MIGRATE_PERSIST_DEST
+    if (flags != (VIR_MIGRATE_OFFLINE | VIR_MIGRATE_PERSIST_DEST) &&
+        flags != (VIR_MIGRATE_OFFLINE | VIR_MIGRATE_PERSIST_DEST | MIGRATE_UNDEFINE_SOURCE)) {
         VIRTRUST_LOG_ERROR("|DomainMigrate|END|returnF|invalid flags, only support 0 and {}",
                            static_cast<unsigned int>(MIGRATE_UNDEFINE_SOURCE));
         return VirtrustRc::ERROR;

@@ -101,15 +101,16 @@ protected:
         return DllibRc::OK;
     }
 
-    template <class R, class... Args> void SelfDlSym(std::string_view funName, DlFun<R, Args...> &outFun)
+    template <class R, class... Args> DllibRc SelfDlSym(std::string_view funName, DlFun<R, Args...> &outFun)
     {
         if (libptr_ == nullptr || funName.empty()) {
-            return;
+            return DllibRc::ERROR;
         }
 
         void *funPtr = dlsym(libptr_, funName.data());
         size_++; // always add up internal size counter
         outFun = DlFun<R, Args...>(funName, reinterpret_cast<R (*)(Args...)>(funPtr));
+        return DllibRc::OK;
     }
 
 private:

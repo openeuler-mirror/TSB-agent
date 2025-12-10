@@ -2,7 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
-
+#include <securec.h>
 #include "virtrust/link/proto/migrate.pb.h"
 
 namespace virtrust {
@@ -95,10 +95,10 @@ static void ReportToProto(const trust_report_new &report, protos::TrustReportNew
     protoReport->set_append_data(reinterpret_cast<const char *>(report.append_data), append_data_len);
 }
 
-static trust_report_new ReportFromProto(const protos::TrustReportNew &protoReport)
+static bool ReportFromProto(const protos::TrustReportNew &protoReport, trust_report_new &report)
 {
     trust_report_new report;
-    memset(&report, 0, sizeof(report));
+    (void)memset_s(&report,sizeof(report), 0, sizeof(report));
     const auto &content = protoReport.content();
 
     // 转换基本字段
@@ -108,11 +108,15 @@ static trust_report_new ReportFromProto(const protos::TrustReportNew &protoRepor
     // 转换字节数组
     const std::string &host_id = content.host_id();
     size_t host_id_len = std::min(host_id.size(), static_cast<size_t>(MAX_HOST_ID_SIZE));
-    memcpy(report.content.host_id, host_id.data(), host_id_len);
+    if (memcpy_s(report.content.host_id, MAX_HOST_ID_SIZE, host_id.data(), host_id_len) != EOK) {
+        return false;
+    }
 
     const std::string &tpcm_id = content.tpcm_id();
     size_t tpcm_id_len = std::min(tpcm_id.size(), static_cast<size_t>(MAX_TPCM_ID_SIZE));
-    memcpy(report.content.tpcm_id, tpcm_id.data(), tpcm_id_len);
+    if (memcpy_s(report.content.tpcm_id, MAX_TPCM_ID_SIZE, tpcm_id.data(), tpcm_id_len) != EOK) {
+        return false;
+    }
 
     // 转换 global_control_policy
     const auto &policy = content.global_control_policy();
@@ -161,36 +165,50 @@ static trust_report_new ReportFromProto(const protos::TrustReportNew &protoRepor
 
     const std::string &log_hash = content.log_hash();
     size_t log_hash_len = std::min(log_hash.size(), static_cast<size_t>(DEFAULT_HASH_SIZE));
-    memcpy(report.content.log_hash, log_hash.data(), log_hash_len);
+    if (memcpy_s(report.content.log_hash, DEFAULT_HASH_SIZE, log_hash.data(), log_hash_len) != EOK) {
+        return false;
+    }
 
     const std::string &bios_pcr = content.bios_pcr();
     size_t bios_pcr_len = std::min(bios_pcr.size(), static_cast<size_t>(DEFAULT_PCR_SIZE));
-    memcpy(report.content.bios_pcr, bios_pcr.data(), bios_pcr_len);
+    if (memcpy_s(report.content.bios_pcr, DEFAULT_PCR_SIZE, bios_pcr.data(), bios_pcr_len) != EOK) {
+        return false;
+    }
 
     const std::string &boot_loader_pcr = content.boot_loader_pcr();
     size_t boot_loader_pcr_len = std::min(boot_loader_pcr.size(), static_cast<size_t>(DEFAULT_PCR_SIZE));
-    memcpy(report.content.boot_loader_pcr, boot_loader_pcr.data(), boot_loader_pcr_len);
+    if (memcpy_s(report.content.boot_loader_pcr, DEFAULT_PCR_SIZE, boot_loader_pcr.data(), boot_loader_pcr_len) != EOK) {
+        return false;
+    }
 
     const std::string &kernel_pcr = content.kernel_pcr();
     size_t kernel_pcr_len = std::min(kernel_pcr.size(), static_cast<size_t>(DEFAULT_PCR_SIZE));
-    memcpy(report.content.kernel_pcr, kernel_pcr.data(), kernel_pcr_len);
+    if (memcpy_s(report.content.kernel_pcr, DEFAULT_PCR_SIZE, kernel_pcr.data(), kernel_pcr_len) != EOK) {
+        return false;
+    }
 
     const std::string &tsb_pcr = content.tsb_pcr();
     size_t tsb_pcr_len = std::min(tsb_pcr.size(), static_cast<size_t>(DEFAULT_PCR_SIZE));
-    memcpy(report.content.tsb_pcr, tsb_pcr.data(), tsb_pcr_len);
+    if (memcpy_s(report.content.tsb_pcr, DEFAULT_PCR_SIZE, tsb_pcr.data(), tsb_pcr_len) != EOK) {
+        return false;
+    }
 
     const std::string &boot_pcr = content.boot_pcr();
     size_t boot_pcr_len = std::min(boot_pcr.size(), static_cast<size_t>(DEFAULT_PCR_SIZE));
-    memcpy(report.content.boot_pcr, boot_pcr.data(), boot_pcr_len);
+    if (memcpy_s(report.content.boot_pcr, DEFAULT_PCR_SIZE, boot_pcr.data(), boot_pcr_len) != EOK) {
+        return false;
+    }
 
     report.content.be_nonce = content.be_nonce();
 
     // 转换 append_data
     const std::string &append_data = protoReport.append_data();
     size_t append_data_len = std::min(append_data.size(), static_cast<size_t>(MAX_TRUST_REPORT_APPENDDATA));
-    memcpy(report.append_data, append_data.data(), append_data_len);
+    if (memcpy_s(report.append_data, MAX_TRUST_REPORT_APPENDDATA, append_data.data(), append_data_len) != EOK) {
+        return false;
+    }
 
-    return report;
+    return true;
 }
 
 static void DescriptionToProto(const Description &desc, protos::Description *protoDesc)
@@ -208,23 +226,26 @@ static void DescriptionToProto(const Description &desc, protos::Description *pro
     protoDesc->set_uuid(desc.uuid, 37);
 }
 
-static Description DescriptionFromProto(const protos::Description &protoDesc)
+static bool DescriptionFromProto(const protos::Description &protoDesc, Description &desc)
 {
-    Description desc;
-    memset(&desc, 0, sizeof(desc));
+    (void) memset_s(&desc,sizeof(desc), 0, sizeof(desc));
 
     desc.state = protoDesc.state();
 
     // Convert name from string
     const std::string &name = protoDesc.name();
     size_t name_len = std::min(name.size(), static_cast<size_t>(MAX_NAME_SIZE));
-    memcpy(desc.name, name.data(), name_len);
+    if (memcpy_s(desc.name, name.data(), name_len) != EOK) {
+        return false;
+    }
 
     // Convert uuid from string (no length truncation for UUID)
     const std::string &uuid = protoDesc.uuid();
-    memcpy(desc.uuid, uuid.data(), std::min(uuid.size(), static_cast<size_t>(37)));
+    if (memcpy_s(desc.uuid, 37, uuid.data(), std::min(uuid.size(), static_cast<size_t>(37)) != EOK) {
+        return false;
+    }
 
-    return desc;
+    return true;
 }
 
 } // namespace virtrust
