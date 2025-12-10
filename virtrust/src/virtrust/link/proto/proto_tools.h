@@ -245,7 +245,7 @@ static bool DescriptionFromProto(const protos::Description &protoDesc, Descripti
 
     // Convert uuid from string (no length truncation for UUID)
     const std::string &uuid = protoDesc.uuid();
-    if (memcpy_s(desc.uuid, 37, uuid.data(), uuid.size()) != EOK)) {
+    if (memcpy_s(desc.uuid, 37, uuid.data(), uuid.size()) != EOK) {
         return false;
     }
 
