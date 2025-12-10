@@ -911,7 +911,7 @@ VirtrustRc DomainStart(const std::unique_ptr<ConnCtx> &conn, const std::string &
         return VirtrustRc::OK;
     }
     if (flags != DOMAIN_START_NONE) {
-        VIRTRUST_LOG_ERROR("flags only support: {}", static_cast<unsigned int>(flags));
+        VIRTRUST_LOG_ERROR("flags only support: {}", static_cast<int>(DOMAIN_START_NONE));
         return VirtrustRc::ERROR;
     }
     auto domain = std::make_unique<DomainCtx>(conn, domainName);

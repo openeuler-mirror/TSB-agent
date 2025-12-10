@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <cstring>
+#include <iostream>
+#include <ostream>
 
 #include "virtrust/link/proto/migrate.pb.h"
 
@@ -99,7 +101,6 @@ static void ReportToProto(const trust_report_new &report, protos::TrustReportNew
 
 static bool ReportFromProto(const protos::TrustReportNew &protoReport, trust_report_new &report)
 {
-    trust_report_new report;
     (void)memset_s(&report, sizeof(report), 0, sizeof(report));
     const auto &content = protoReport.content();
 
@@ -238,13 +239,13 @@ static bool DescriptionFromProto(const protos::Description &protoDesc, Descripti
     // Convert name from string
     const std::string &name = protoDesc.name();
     size_t name_len = std::min(name.size(), static_cast<size_t>(MAX_NAME_SIZE));
-    if (memcpy_s(desc.name, name.data(), name_len) != EOK) {
+    if (memcpy_s(desc.name, 255, name.data(), name_len) != EOK) {
         return false;
     }
 
     // Convert uuid from string (no length truncation for UUID)
     const std::string &uuid = protoDesc.uuid();
-    if (memcpy_s(desc.uuid, 37, uuid.data(), std::min(uuid.size(), static_cast<size_t>(37)) != EOK) {
+    if (memcpy_s(desc.uuid, 37, uuid.data(), uuid.size()) != EOK)) {
         return false;
     }
 

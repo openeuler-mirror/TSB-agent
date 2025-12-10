@@ -4,11 +4,14 @@
 
 #include <cstring>
 #include <string>
-
+#include <securec.h>
 #include "gtest/gtest.h"
 #include "tsb_agent/tsb_agent.h"
 
 #include "virtrust/link/proto/proto_tools.h"
+
+#include <iostream>
+#include <ostream>
 
 #include "virtrust/link/proto/migrate.pb.h"
 
@@ -200,7 +203,8 @@ TEST_F(ProtoToolsTest, ReportFromProtoBasicFields)
     protos::TrustReportNew protoReport;
     ReportToProto(testReport_, &protoReport);
 
-    trust_report_new convertedReport = ReportFromProto(protoReport);
+    trust_report_new convertedReport;
+    ReportFromProto(protoReport, convertedReport);
 
     // Verify basic fields
     EXPECT_EQ(convertedReport.content.be_host_report_time, testReport_.content.be_host_report_time);
@@ -222,7 +226,8 @@ TEST_F(ProtoToolsTest, ReportFromProtoGlobalControlPolicy)
     protos::TrustReportNew protoReport;
     ReportToProto(testReport_, &protoReport);
 
-    trust_report_new convertedReport = ReportFromProto(protoReport);
+    trust_report_new convertedReport;
+    ReportFromProto(protoReport, convertedReport);
 
     const auto &policy = protoReport.content().global_control_policy();
     EXPECT_EQ(convertedReport.content.global_control_policy.be_size, policy.be_size());
@@ -262,7 +267,8 @@ TEST_F(ProtoToolsTest, ReportFromProtoByteArrays)
     protos::TrustReportNew protoReport;
     ReportToProto(testReport_, &protoReport);
 
-    trust_report_new convertedReport = ReportFromProto(protoReport);
+    trust_report_new convertedReport;
+    ReportFromProto(protoReport, convertedReport);
 
     // Verify byte arrays
     EXPECT_EQ(memcmp(convertedReport.content.host_id, testReport_.content.host_id, MAX_HOST_ID_SIZE), 0);
@@ -283,7 +289,8 @@ TEST_F(ProtoToolsTest, RoundTripConversion)
     protos::TrustReportNew protoReport;
     ReportToProto(testReport_, &protoReport);
 
-    trust_report_new convertedReport = ReportFromProto(protoReport);
+    trust_report_new convertedReport;
+    ReportFromProto(protoReport, convertedReport);
 
     // Verify all basic fields match
     EXPECT_EQ(convertedReport.content.be_host_report_time, testReport_.content.be_host_report_time);
@@ -312,7 +319,8 @@ TEST_F(ProtoToolsTest, EmptyReportConversion)
     protos::TrustReportNew protoReport;
     ReportToProto(emptyReport, &protoReport);
 
-    trust_report_new convertedReport = ReportFromProto(protoReport);
+    trust_report_new convertedReport;
+    ReportFromProto(protoReport, convertedReport);
 
     // Verify all fields are zero
     EXPECT_EQ(convertedReport.content.be_host_report_time, 0u);
@@ -400,7 +408,8 @@ TEST_F(ProtoToolsTest, DescriptionFromProtoBasicFields)
     protos::Description protoDesc;
     DescriptionToProto(testDesc, &protoDesc);
 
-    Description convertedDesc = DescriptionFromProto(protoDesc);
+    Description convertedDesc;
+    DescriptionFromProto(protoDesc, convertedDesc);
 
     // Verify basic fields
     EXPECT_EQ(convertedDesc.state, testDesc.state);
@@ -421,7 +430,8 @@ TEST_F(ProtoToolsTest, DescriptionFromProtoNameField)
     protos::Description protoDesc;
     DescriptionToProto(testDesc, &protoDesc);
 
-    Description convertedDesc = DescriptionFromProto(protoDesc);
+    Description convertedDesc;
+    DescriptionFromProto(protoDesc, convertedDesc);
 
     // Verify name field
     EXPECT_EQ(memcmp(convertedDesc.name, testDesc.name, MAX_NAME_SIZE), 0);
@@ -440,9 +450,13 @@ TEST_F(ProtoToolsTest, DescriptionFromProtoUuidField)
 
     protos::Description protoDesc;
     DescriptionToProto(testDesc, &protoDesc);
+    std::cout << protoDesc.uuid() << std::endl;
 
-    Description convertedDesc = DescriptionFromProto(protoDesc);
-
+    Description convertedDesc;
+    bool res = DescriptionFromProto(protoDesc, convertedDesc);
+    EXPECT_EQ(res, true);
+    std::cout << testDesc.uuid << std::endl;
+    std::cout << convertedDesc.uuid << std::endl;
     // Verify uuid field
     EXPECT_EQ(memcmp(convertedDesc.uuid, testDesc.uuid, 37), 0);
 }
@@ -467,7 +481,8 @@ TEST_F(ProtoToolsTest, DescriptionRoundTripConversion)
     protos::Description protoDesc;
     DescriptionToProto(testDesc, &protoDesc);
 
-    Description convertedDesc = DescriptionFromProto(protoDesc);
+    Description convertedDesc;
+    DescriptionFromProto(protoDesc, convertedDesc);
 
     // Verify all fields match
     EXPECT_EQ(convertedDesc.state, testDesc.state);
@@ -483,7 +498,8 @@ TEST_F(ProtoToolsTest, EmptyDescriptionConversion)
     protos::Description protoDesc;
     DescriptionToProto(emptyDesc, &protoDesc);
 
-    Description convertedDesc = DescriptionFromProto(protoDesc);
+    Description convertedDesc;
+    DescriptionFromProto(protoDesc, convertedDesc);
 
     // Verify all fields are zero
     EXPECT_EQ(convertedDesc.state, 0);
@@ -512,7 +528,8 @@ TEST_F(ProtoToolsTest, DescriptionWithPartialName)
     protos::Description protoDesc;
     DescriptionToProto(partialDesc, &protoDesc);
 
-    Description convertedDesc = DescriptionFromProto(protoDesc);
+    Description convertedDesc;
+    DescriptionFromProto(protoDesc,convertedDesc);
 
     // Verify state field
     EXPECT_EQ(convertedDesc.state, 2);

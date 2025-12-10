@@ -423,8 +423,20 @@ MigrateSessionRc MigrationSession::VerifyHostAndVmReport(const protos::TrustRepo
                                                          const protos::TrustReportNew &vmProtoReport)
 {
     VIRTRUST_LOG_DEBUG("|VerifyHostAndVmReport|START|");
-    trust_report_new hostReport = ReportFromProto(hostProtoReport);
-    trust_report_new vmReport = ReportFromProto(vmProtoReport);
+    trust_report_new hostReport;
+    bool success = ReportFromProto(hostProtoReport, hostReport);
+    if (!success) {
+        VIRTRUST_LOG_DEBUG("|VerifyHostAndVmReport|END|returnF|domain name: {}|TSB: report from proto failed.",
+                           domainName_);
+        return MigrateSessionRc::ERROR;
+    }
+    trust_report_new vmReport;
+    success = ReportFromProto(vmProtoReport, vmReport);
+    if (!success) {
+        VIRTRUST_LOG_DEBUG("|VerifyHostAndVmReport|END|returnF|domain name: {}|TSB: report from proto failed.",
+                           domainName_);
+        return MigrateSessionRc::ERROR;
+    }
     VIRTRUST_LOG_DEBUG("|domain name: {}|TSB: VerifyTrustReport start.", domainName_);
     auto ret = VerifyTrustReport(sessionId_.data(), sessionId_.data(), &hostReport, &vmReport);
     if (ret != 0) {
@@ -795,7 +807,15 @@ MigrateSessionRc MigrationSession::OnTransferDataRequestReceived(const protos::V
 
     // 导入服务端发来的虚拟机描述信息
     auto protosDesc = request->vtpcminfo();
-    auto vmInfo = DescriptionFromProto(protosDesc);
+    Description vmInfo;
+    bool success = DescriptionFromProto(protosDesc, vmInfo);
+    if (!success) {
+        EnterState(State::Failed);
+        VIRTRUST_LOG_ERROR(
+            "|OnTransferDataRequestReceived|END|returnF|domain name: {}|TSB: description from proto failed.",
+            domainName_);
+        return MigrateSessionRc::ERROR;
+    }
     vmInfo.state = VM_SHUTUP;
     VIRTRUST_LOG_DEBUG("|domain name: {}|TSB: CreateVRoot start", domainName_);
     ret = CreateVRoot(&vmInfo);

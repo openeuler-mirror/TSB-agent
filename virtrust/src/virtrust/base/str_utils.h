@@ -166,7 +166,7 @@ inline bool IsAbsolutePath(std::string &filePath)
     return true;
 }
 
-bool CanonicalPath(std::string filePath)
+inline bool CanonicalPath(std::string filePath)
 {
     if (filePath.empty() || filePath.size() > PATH_MAX) {
         return false;
@@ -179,7 +179,7 @@ bool CanonicalPath(std::string filePath)
     return true;
 }
 
-bool CheckFileStat(std::string filePath)
+inline bool CheckFileStat(std::string filePath)
 {
     struct stat st;
     if (stat(filePath.c_str(), &st) != 0) {
@@ -192,7 +192,7 @@ bool CheckFileStat(std::string filePath)
     return true;
 }
 
-bool CheckFilePathValid(std::string &filePath)
+inline bool CheckFilePathValid(std::string &filePath)
 {
     if (!IsAbsolutePath(filePath)) {
         return false;
