@@ -35,8 +35,8 @@ constexpr int LIST_DOMAINS_MASK = DomainListFlags::LIST_DOMAINS_ACTIVE | DomainL
 namespace {
 
 constexpr std::string_view VIRT_INSTALL_ARG_NO_AUTO_CONSOLE = "--noautoconsole";
-constexpr std::string_view VIRT_INSTALL_ARG_NO_REBOOT       = "--noreboot";
-constexpr std::string_view VIRT_INSTALL_ARG_CONNECT         = "--connect";
+constexpr std::string_view VIRT_INSTALL_ARG_NO_REBOOT = "--noreboot";
+constexpr std::string_view VIRT_INSTALL_ARG_CONNECT = "--connect";
 
 inline std::string GetNameStr(const virDomainPtr domian)
 {
@@ -410,8 +410,7 @@ VirtrustRc CreateDomainAndVRoot(const std::unique_ptr<ConnCtx> &conn, const std:
     }
     Description description{};
     description.state = 0;
-    if (strncpy_s(description.name, sizeof(description.name), domainName.data(), sizeof(description.name) - 1) !=
-        EOK) {
+    if (strncpy_s(description.name, sizeof(description.name), domainName.data(), sizeof(description.name) - 1) != EOK) {
         VIRTRUST_LOG_ERROR("|DomainCreate|END|returnF||strncpy_s domainName failed.");
 
         return VirtrustRc::ERROR;
@@ -570,7 +569,7 @@ auto ToMaps(int tsbVmNum, Description *tsbVmInfo, int virtVmNum, virDomainPtr *v
             !CompareTsbVirtState((tsbVmInfo + i)->state, VIR_DOMAIN_RUNNING)) {
             continue;
         }
-         // 如果查INACTIVE 过滤running态的
+        // 如果查INACTIVE 过滤running态的
         if (flags == DomainListFlags::LIST_DOMAINS_INACTIVE &&
             CompareTsbVirtState((tsbVmInfo + i)->state, VIR_DOMAIN_RUNNING)) {
             continue;
@@ -647,12 +646,12 @@ VirtrustRc DomainCreate(const std::unique_ptr<ConnCtx> &conn, const std::vector<
     }
 
     // string to char* for execv
-    std::vector<char*> execArgs;
+    std::vector<char *> execArgs;
     execArgs.reserve(execArgsStr.size() + 1); // +1 for nullptr
     for (auto &s : execArgsStr) {
         execArgs.push_back(s.data());
     }
-    execArgs.push_back(nullptr);  // end with nullptr
+    execArgs.push_back(nullptr); // end with nullptr
 
     std::string argStr = MakeString(execArgs);
     // run virt-install in a child progress

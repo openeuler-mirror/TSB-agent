@@ -369,8 +369,7 @@ TEST_F(ProtoToolsTest, DescriptionToProtoNameField)
 
     // Verify name field - should match the actual string length (ignoring null padding)
     size_t expectedNameLen = strnlen(testDesc.name, MAX_NAME_SIZE);
-    EXPECT_EQ(protoDesc.name(),
-              std::string(testDesc.name, expectedNameLen));
+    EXPECT_EQ(protoDesc.name(), std::string(testDesc.name, expectedNameLen));
 }
 
 TEST_F(ProtoToolsTest, DescriptionToProtoUuidField)
@@ -388,8 +387,7 @@ TEST_F(ProtoToolsTest, DescriptionToProtoUuidField)
     DescriptionToProto(testDesc, &protoDesc);
 
     // Verify uuid field - should be full 37 bytes (including null terminator)
-    EXPECT_EQ(protoDesc.uuid(),
-              std::string(testDesc.uuid, 37));
+    EXPECT_EQ(protoDesc.uuid(), std::string(testDesc.uuid, 37));
 }
 
 TEST_F(ProtoToolsTest, DescriptionFromProtoBasicFields)

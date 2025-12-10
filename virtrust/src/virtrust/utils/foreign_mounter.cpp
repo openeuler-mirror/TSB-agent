@@ -273,7 +273,6 @@ std::string VerifyConfig::GetInitrdVersion()
     return p.stem().string();
 }
 
-
 std::string VerifyConfig::GetLinuzVersion()
 {
     auto linuzPath = GetLinuzPath();

@@ -19,7 +19,7 @@ namespace virtrust {
 
 namespace {
 // RPC timeout unit: seconds
-constexpr uint32_t RPC_SIGNAL_TIMEOUT   = 5;
+constexpr uint32_t RPC_SIGNAL_TIMEOUT = 5;
 constexpr uint32_t RPC_TRANSFER_TIMEOUT = 20;
 
 unsigned int GetFlagCleard(const unsigned int &flags, const unsigned int &clear)
@@ -411,8 +411,8 @@ MigrateSessionRc MigrationSession::VerifyCertificate(std::string uuid, std::stri
     VIRTRUST_LOG_DEBUG("|domain name: {}|TSB: MigrationCheckPeerPk start.", domainName_);
     int ret = MigrationCheckPeerPk(uuid.data(), cert.data(), pubkey.data());
     if (ret != 0) {
-        VIRTRUST_LOG_DEBUG(
-            "|VerifyCertificate|END|returnF|domain name: {}|TSB: MigrationCheckPeerPk failed.", domainName_);
+        VIRTRUST_LOG_DEBUG("|VerifyCertificate|END|returnF|domain name: {}|TSB: MigrationCheckPeerPk failed.",
+                           domainName_);
         return MigrateSessionRc::ERROR;
     }
     VIRTRUST_LOG_DEBUG("|domain name: {}|TSB: MigrationCheckPeerPk success.", domainName_);
@@ -428,8 +428,8 @@ MigrateSessionRc MigrationSession::VerifyHostAndVmReport(const protos::TrustRepo
     VIRTRUST_LOG_DEBUG("|domain name: {}|TSB: VerifyTrustReport start.", domainName_);
     auto ret = VerifyTrustReport(sessionId_.data(), sessionId_.data(), &hostReport, &vmReport);
     if (ret != 0) {
-        VIRTRUST_LOG_DEBUG(
-            "|VerifyHostAndVmReport|END|returnF|domain name: {}|TSB: VerifyTrustReport failed.", domainName_);
+        VIRTRUST_LOG_DEBUG("|VerifyHostAndVmReport|END|returnF|domain name: {}|TSB: VerifyTrustReport failed.",
+                           domainName_);
         return MigrateSessionRc::ERROR;
     }
     VIRTRUST_LOG_DEBUG("|domain name: {}|TSB: VerifyTrustReport success.", domainName_);
@@ -611,8 +611,7 @@ MigrateSessionRc MigrationSession::ExportTcm2Key(std::string &tcm2Key)
 MigrateSessionRc MigrationSession::ImportTcm2Key(std::string_view tcm2Key)
 {
     VIRTRUST_LOG_DEBUG("|domain name: {}|TSB: TransDupPub import start.", domainName_);
-    auto ret = TransDupPub(EN_IMPORT, sessionId_.data(), nullptr, nullptr,
-                        std::string(tcm2Key).data(), tcm2Key.size());
+    auto ret = TransDupPub(EN_IMPORT, sessionId_.data(), nullptr, nullptr, std::string(tcm2Key).data(), tcm2Key.size());
     if (ret != 0) {
         VIRTRUST_LOG_ERROR("|ImportTcm2Key|END|returnF|domain name: {}|TSB: TransDupPub import failed.", domainName_);
         return MigrateSessionRc::ERROR;
@@ -784,10 +783,7 @@ MigrateSessionRc MigrationSession::OnTransferDataRequestReceived(const protos::V
     auto cipherData = request->cipherdata();
 
     VIRTRUST_LOG_DEBUG("|domain name: {}|TSB: MigrationImportVrootCipher start", domainName_);
-    auto ret = MigrationImportVrootCipher(uuid.data(),
-                                          uuid.data(),
-                                          cipherData.data(),
-                                          cipherData.size());
+    auto ret = MigrationImportVrootCipher(uuid.data(), uuid.data(), cipherData.data(), cipherData.size());
     if (ret != 0) {
         EnterState(State::Failed);
         VIRTRUST_LOG_ERROR(

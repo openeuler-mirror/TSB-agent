@@ -1,15 +1,17 @@
 #pragma once
 
+#include <securec.h>
+
 #include <algorithm>
 #include <cstring>
-#include <securec.h>
+
 #include "virtrust/link/proto/migrate.pb.h"
 
 namespace virtrust {
 static void ReportToProto(const trust_report_new &report, protos::TrustReportNew *protoReport)
 {
     if (protoReport == nullptr) {
-        return ;
+        return;
     }
     // 转换 content
     auto *content = protoReport->mutable_content();
@@ -98,7 +100,7 @@ static void ReportToProto(const trust_report_new &report, protos::TrustReportNew
 static bool ReportFromProto(const protos::TrustReportNew &protoReport, trust_report_new &report)
 {
     trust_report_new report;
-    (void)memset_s(&report,sizeof(report), 0, sizeof(report));
+    (void)memset_s(&report, sizeof(report), 0, sizeof(report));
     const auto &content = protoReport.content();
 
     // 转换基本字段
@@ -177,7 +179,8 @@ static bool ReportFromProto(const protos::TrustReportNew &protoReport, trust_rep
 
     const std::string &boot_loader_pcr = content.boot_loader_pcr();
     size_t boot_loader_pcr_len = std::min(boot_loader_pcr.size(), static_cast<size_t>(DEFAULT_PCR_SIZE));
-    if (memcpy_s(report.content.boot_loader_pcr, DEFAULT_PCR_SIZE, boot_loader_pcr.data(), boot_loader_pcr_len) != EOK) {
+    if (memcpy_s(report.content.boot_loader_pcr, DEFAULT_PCR_SIZE, boot_loader_pcr.data(), boot_loader_pcr_len) !=
+        EOK) {
         return false;
     }
 
@@ -214,7 +217,7 @@ static bool ReportFromProto(const protos::TrustReportNew &protoReport, trust_rep
 static void DescriptionToProto(const Description &desc, protos::Description *protoDesc)
 {
     if (protoDesc == nullptr) {
-        return ;
+        return;
     }
     protoDesc->set_state(desc.state);
 
@@ -228,7 +231,7 @@ static void DescriptionToProto(const Description &desc, protos::Description *pro
 
 static bool DescriptionFromProto(const protos::Description &protoDesc, Description &desc)
 {
-    (void) memset_s(&desc,sizeof(desc), 0, sizeof(desc));
+    (void)memset_s(&desc, sizeof(desc), 0, sizeof(desc));
 
     desc.state = protoDesc.state();
 

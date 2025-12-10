@@ -4,19 +4,20 @@
 
 #pragma once
 
+#include <limits.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include <cctype>
 #include <cstring>
 #include <fstream>
 #include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
-#include <cctype>
-#include <unistd.h>
-#include <sys/stat.h>
-#include <limits.h>
 
 namespace virtrust {
-constexpr  uint32_t MAX_FILE_SIZE = 5 * 1024 * 1024;
+constexpr uint32_t MAX_FILE_SIZE = 5 * 1024 * 1024;
 inline void MakeStringInternal(std::stringstream &)
 {}
 
@@ -144,11 +145,13 @@ inline bool StartsWithIgnoreSpaces(const std::string &str, std::string_view pref
     return str.substr(start).find(prefix) == 0;
 }
 
-    inline  bool Exist(std::string &filePath, const int &mode) {
+inline bool Exist(std::string &filePath, const int &mode)
+{
     return access(filePath.c_str(), mode) != -1;
 }
 
-    inline bool IsAbsolutePath(std::string &filePath) {
+inline bool IsAbsolutePath(std::string &filePath)
+{
     if (filePath.length() == 0) {
         return false;
     }
@@ -163,7 +166,8 @@ inline bool StartsWithIgnoreSpaces(const std::string &str, std::string_view pref
     return true;
 }
 
-    bool CanonicalPath(std::string filePath) {
+bool CanonicalPath(std::string filePath)
+{
     if (filePath.empty() || filePath.size() > PATH_MAX) {
         return false;
     }
@@ -175,7 +179,8 @@ inline bool StartsWithIgnoreSpaces(const std::string &str, std::string_view pref
     return true;
 }
 
-    bool CheckFileStat(std::string filePath) {
+bool CheckFileStat(std::string filePath)
+{
     struct stat st;
     if (stat(filePath.c_str(), &st) != 0) {
         return false;
@@ -187,7 +192,8 @@ inline bool StartsWithIgnoreSpaces(const std::string &str, std::string_view pref
     return true;
 }
 
-bool CheckFilePathValid(std::string &filePath) {
+bool CheckFilePathValid(std::string &filePath)
+{
     if (!IsAbsolutePath(filePath)) {
         return false;
     }
@@ -218,7 +224,7 @@ inline std::vector<std::string> ExtractStringsFromBinary(std::string_view conten
     std::vector<std::string> out;
     std::string cur;
 
-    for (const char c: content) {
+    for (const char c : content) {
         const unsigned char uc = static_cast<unsigned char>(c);
         // the blank space is in isprint()
         if (isprint(uc) || c == '\t') {

@@ -96,7 +96,7 @@ private:
             return DllibRc::ERROR;
         }
         if (DLLIB_SELF_DLSYM(guestfs_mount_ro) != DllibRc::OK) {
-            return  DllibRc::ERROR;
+            return DllibRc::ERROR;
         }
         if (DLLIB_SELF_DLSYM(guestfs_umount_all) != DllibRc::OK) {
             return DllibRc::ERROR;
