@@ -836,11 +836,11 @@ MigrateSessionRc MigrationSession::OnFinishedRequestReceived(bool finished)
         return MigrateSessionRc::ERROR;
     }
     if (!finished) {
-        VIRTRUST_LOG_ERROR("|OnFinishedRequestReceived|END|returnS|domain name: {}|Migrate failed.", domainName_);
+        VIRTRUST_LOG_ERROR("|OnFinishedRequestReceived|END|returnF|domain name: {}|Migrate failed.", domainName_);
         Cleanup();
         return MigrateSessionRc::OK;
     }
-    VIRTRUST_LOG_DEBUG("|OnFinishedRequestReceived|END|returnS|domain name: {}|Migrate success.", domainName_);
+    VIRTRUST_LOG_DEBUG("|OnFinishedRequestReceived|RUNNING||domain name: {}|Migrate success.", domainName_);
 
     // 通知TSB迁移成功，如果调用失败，TSB虚机状态会保持 VM_MIGRATION
     auto rc = NotifyVRMigration(true);
