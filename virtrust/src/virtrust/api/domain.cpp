@@ -987,14 +987,15 @@ VirtrustRc DomainStart(const std::unique_ptr<ConnCtx> &conn, const std::string &
     std::string uuid = GetUUIDStr(domain->Get());
     auto asyncStartVRoot = std::async(&StartVRoot, uuid.data());
     VIRTRUST_LOG_INFO("Perform checking on: {} before start", domainName);
-    if (!CheckGuestBeforeStart(domainName, uuid)) {
+    auto checkOk = CheckGuestBeforeStart(domainName, uuid);
+    auto startVRootRc = asyncStartVRoot.get();
+    if (!checkOk && startVRootRc == 0) {
         VIRTRUST_LOG_ERROR("Check domain failed,domainName: {}", domainName);
         if (StopVRoot(uuid.data()) != 0) {
             VIRTRUST_LOG_ERROR("stop vRoot failed domain: {}", domainName);
         }
         return VirtrustRc::ERROR;
     }
-    auto startVRootRc = asyncStartVRoot.get();
     if (startVRootRc != 0) {
         VIRTRUST_LOG_ERROR("stop vRoot failed uuid: {}", uuid);
         return VirtrustRc::ERROR;
