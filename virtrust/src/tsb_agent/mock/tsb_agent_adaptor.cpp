@@ -158,21 +158,6 @@ int MigrationCheckPeerPk(char *vUuid, // 虚拟机的uuid
     return 0;
 }
 
-int MigrationGetVrootCipher(char *vUuid,   // 虚拟机的uuid
-                            char **cipher, // 输出：加密后的密码资源
-                            int *cipherLen // 输出：密文长度
-)
-{
-    return 0;
-}
-
-int MigrationImportVrootCipher(char *vUuid, // 虚拟机的uuid
-                               char *cipher // 加密后的密码资源
-)
-{
-    return 0;
-}
-
 int MigrationNotify(char *vUuid, // 虚拟机的uuid
                     int status)
 {
