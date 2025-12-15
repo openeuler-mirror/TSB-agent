@@ -3,12 +3,12 @@
 #include "virtrust/api/domain.h"
 
 #include <fcntl.h>
-#include <future>
 #include <securec.h>
 #include <sys/file.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <future>
 #include <unordered_set>
 
 #include "spdlog/fmt/fmt.h"
@@ -142,7 +142,8 @@ bool CalcVirshMeasure(std::string_view guestName, VirshMeasureSummary &measureSu
     }
     auto end = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-    VIRTRUST_LOG_DEBUG("|main||calc time-consuming, target: func_mount, duration:{} ms", verifyConfig.GetDiskPath(), duration.count());
+    VIRTRUST_LOG_DEBUG("|main||calc time-consuming, target: func_mount, duration:{} ms", verifyConfig.GetDiskPath(),
+                       duration.count());
 
     std::string grubCfgContent;
     ForeignMounterRc rc = mounter.ReadFile(verifyConfig.GetGrubCfgPath(), grubCfgContent);
@@ -246,7 +247,8 @@ bool CheckGuestBeforeStart(std::string_view domainName, std::string &uuid)
     auto tsbRc = CheckMeasure(uuid.data(), bios, shim, grub, grubCfg, kernel, initrd);
     auto end = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-    VIRTRUST_LOG_DEBUG("|CheckGuestBeforeStart||calc time-consuming, target: func_checkMeasure, duration:{} ms", duration.count());
+    VIRTRUST_LOG_DEBUG("|CheckGuestBeforeStart||calc time-consuming, target: func_checkMeasure, duration:{} ms",
+                       duration.count());
     FreeMeasureInfo(bios, shim, grub, grubCfg, kernel, initrd);
 
     if (tsbRc == IMPORT_BM_FAILURE) {
@@ -648,7 +650,8 @@ VirtrustRc CheckCreateArgs(const std::vector<std::string> &args)
         auto &arg = args[pos];
         if (arg.empty() || arg.size() > CREATE_ARGS_MAX_STRING_LENGTH) {
             VIRTRUST_LOG_ERROR("|CheckCreateArgs|END|returnF||Arg with index {} not valid, "
-                               "length needs to be between {} and {}.", pos, 1, CREATE_ARGS_MAX_STRING_LENGTH);
+                               "length needs to be between {} and {}.",
+                               pos, 1, CREATE_ARGS_MAX_STRING_LENGTH);
             return VirtrustRc::ERROR;
         }
     }
