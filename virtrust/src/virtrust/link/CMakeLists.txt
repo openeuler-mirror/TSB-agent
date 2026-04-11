@@ -8,7 +8,7 @@ set(VIRTRUST_SOURCE_FILES
     ${CMAKE_CURRENT_LIST_DIR}/migration_session.cpp)
 
 # Add Mock source files in Fuzz mode
-if(ENABLE_MOCK)
+if(ENABLE_MOCK_4_FUZZ)
     list(APPEND VIRTRUST_SOURCE_FILES
             ${CMAKE_CURRENT_SOURCE_DIR}/mock/grpc_client_mock.cpp
     )

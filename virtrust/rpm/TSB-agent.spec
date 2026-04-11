@@ -62,9 +62,10 @@ tar -xzf %{SOURCE4} -C "$DEPS_SRC/spdlog" --strip-components=1
 mkdir -p "$DEPS_SRC/libboundscheck-src"
 tar -xzf %{SOURCE5} -C "$DEPS_SRC/libboundscheck-src" --strip-components=1
 
-%global root_dir        %{_builddir}/%{name}-%{version}
-%global build_dir       %{_builddir}/%{name}-%{version}/build
-%global output_dir      %{_builddir}/%{name}-%{version}/output
+%global root_dir               %{_builddir}/%{name}-%{version}
+%global build_dir              %{_builddir}/%{name}-%{version}/build
+%global output_dir             %{_builddir}/%{name}-%{version}/output
+%global test_virtrust_dir      /opt/test_virtrust_dir
 
 %build
 export CFLAGS="%{optflags}"
@@ -87,6 +88,7 @@ rm -rf %{buildroot}
 
 # Directory
 install -d -m 750 %{buildroot}%{_libdir}
+install -d -m 750 %{buildroot}%{test_virtrust_dir}
 install -d -m 750 %{buildroot}%{_bindir}
 install -d -m 750 %{buildroot}%{_includedir}/virtrust
 install -d -m 750 %{buildroot}%{_includedir}/virtrust/api
@@ -95,6 +97,7 @@ install -d -m 750 %{buildroot}%{_sysconfdir}/virtrust
 
 # Library files
 install -m 550 %{output_dir}/lib64/libvirtrust-shared.so        %{buildroot}%{_libdir}
+install -m 550 %{output_dir}/lib64/libinterfac.so               %{buildroot}%{test_virtrust_dir}
 
 # Executable files
 install -m 550 %{output_dir}/bin/virtrust-sh                    %{buildroot}%{_bindir}
@@ -112,6 +115,7 @@ install -pm 640 %{root_dir}/test/data/config.json               %{buildroot}%{_s
 %config %attr(0640, root, root) %{_sysconfdir}/virtrust/config.json
 
 %{_libdir}/libvirtrust-shared.so
+%{test_virtrust_dir}/libinterfac.so
 %{_bindir}/virtrust-sh
 %{_bindir}/libvirtrustd
 %{_includedir}/virtrust/api/*.h

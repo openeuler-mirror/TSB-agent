@@ -7,7 +7,7 @@ set(VIRTRUST_SOURCE_FILES
     ${CMAKE_CURRENT_LIST_DIR}/foreign_mounter.cpp)
 
 # Add Mock source files in Fuzz mode
-if(ENABLE_MOCK)
+if(ENABLE_MOCK_4_FUZZ)
     list(APPEND VIRTRUST_SOURCE_FILES
         ${CMAKE_CURRENT_LIST_DIR}/mock/file_io_mock.cpp
     )

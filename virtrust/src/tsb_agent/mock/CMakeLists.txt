@@ -1,47 +1,26 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026-2026. All rights reserved.
 
-# Note mock/tsb-agent is a sepatate static lib
+# Mock TSB Agent 编译为共享库 libinterfac.so
+# 使用方式: 将编译出的 libinterfac.so 部署到系统，代替真实的 libinterfac.so 用于测试
+# 编译命令: cmake -DUSE_MOCK_TSB_AGENT=On .. && make interfac
 
+# SO 导出层 + mock 实现
+add_library(interfac SHARED ${CMAKE_CURRENT_LIST_DIR}/tsb_agent_adaptor.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/tsb_agent_impl.cpp)
 
-# Use full mock implementation for regular testing
-add_library(tsb-agent STATIC ${CMAKE_CURRENT_LIST_DIR}/tsb_agent_impl.cpp
-        ${CMAKE_CURRENT_LIST_DIR}/tsb_agent_adaptor.cpp)
-
-set_target_properties(tsb-agent PROPERTIES
+set_target_properties(interfac PROPERTIES
+        VERSION 1.0.0
+        SOVERSION 1
+        OUTPUT_NAME interfac
         POSITION_INDEPENDENT_CODE ON
 )
-target_include_directories(tsb-agent PRIVATE ${CMAKE_DEPS_INCLUDEDIR}
+
+target_include_directories(interfac PRIVATE ${CMAKE_DEPS_INCLUDEDIR}
         $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src>)
 
-target_link_libraries(tsb-agent PRIVATE Deps::spdlog Deps::secure_c)
+target_link_libraries(interfac PRIVATE Deps::spdlog Deps::secure_c)
 
-# add mock tsb-agent test
-
-#if(BUILD_TEST)
-#  add_executable(tsb_agent_test tsb_agent_test.cpp)
-#  target_link_libraries(tsb_agent_test PRIVATE tsb-agent Deps::gtest)
-#  target_include_directories(
-#    tsb_agent_test PRIVATE ${CMAKE_DEPS_INCLUDEDIR}
-#                           $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src>)
-#
-#  add_test(NAME tsb_agent_test COMMAND tsb_agent_test)
-#  set_tests_properties(
-#    tsb_agent_test
-#    PROPERTIES
-#      ENVIRONMENT
-#      "LD_LIBRARY_PATH=${CMAKE_LIBRARY_OUTPUT_DIRECTORY}:$ENV{LD_LIBRARY_PATH}")
-#
-#  add_executable(tsb_agent_impl_test tsb_agent_impl_test.cpp)
-#  target_link_libraries(tsb_agent_impl_test PRIVATE tsb-agent Deps::gtest)
-#  target_include_directories(
-#    tsb_agent_impl_test PRIVATE ${CMAKE_DEPS_INCLUDEDIR}
-#                                $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src>)
-#
-#  add_test(NAME tsb_agent_impl_test COMMAND tsb_agent_impl_test)
-#  set_tests_properties(
-#    tsb_agent_impl_test
-#    PROPERTIES
-#      ENVIRONMENT
-#      "LD_LIBRARY_PATH=${CMAKE_LIBRARY_OUTPUT_DIRECTORY}:$ENV{LD_LIBRARY_PATH}")
-#
-#endif()
+# 安装配置: 安装到 lib 目录
+install(TARGETS interfac
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        COMPONENT runtime)

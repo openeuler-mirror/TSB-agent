@@ -2,8 +2,7 @@ cmake_minimum_required(VERSION 3.22)
 project(virtrust CXX C)
 
 option(BUILD_TEST "Enable/Disable tests" On)
-option(USE_MOCK_TSB_AGENT "Use Mocked Tsb Agent (DO NOT USE IN PRODUCTION)" Off)
-option(ENABLE_MOCK "Enable mock for UT" Off)
+option(ENABLE_MOCK_4_FUZZ "Enable mock for UT" Off)
 
 set(USER_DEPS_DIR
     "${PROJECT_SOURCE_DIR}/external"
@@ -48,17 +47,7 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
       "CMAKE_BUILD_TYPE not specified, defaulting to '${CMAKE_BUILD_TYPE}'")
 endif()
 
-if(USE_MOCK_TSB_AGENT)
-  add_compile_definitions(USE_MOCK_TSB_AGENT)
-  if(CMAKE_BUILD_TYPE STREQUAL "Release")
-    message(
-      WARNING
-        "USE_MOCK_TSB_AGENT has been set to On while building with Release, please make sure this is intentional."
-    )
-  endif()
-endif()
-
-if (ENABLE_MOCK)
+if (ENABLE_MOCK_4_FUZZ)
   add_compile_definitions(VIRTRUST_MOCK)
 endif()
 
@@ -130,8 +119,7 @@ message(STATUS "Exe Linker Flags  :\n${CMAKE_EXE_LINKER_FLAGS}")
 message(STATUS "CMAKE_INSTALL_PREFIX  :${CMAKE_INSTALL_PREFIX}")
 message(STATUS "CMAKE_DEPS_SRCDIR  :${CMAKE_DEPS_SRCDIR}")
 message(STATUS "(opt) BUILD_TEST  :${BUILD_TEST}")
-message(STATUS "(opt) USE_MOCK_TSB_AGENT  :${USE_MOCK_TSB_AGENT}")
-message(STATUS "(opt) ENABLE_MOCK  :${ENABLE_MOCK}")
+message(STATUS "(opt) ENABLE_MOCK_4_FUZZ  :${ENABLE_MOCK_4_FUZZ}")
 
 include(FetchContent)
 include(ExternalProject)

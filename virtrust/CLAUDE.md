@@ -24,7 +24,6 @@ cmake -DCMAKE_BUILD_TYPE=Asan ..
 
 # Configure options
 cmake -DBUILD_TEST=On ..          # Enable tests (default: On)
-cmake -DUSE_MOCK_TSB_AGENT=On .. # Use mock TSB agent (default: On, DO NOT USE IN PRODUCTION)
 
 # Build
 cmake --build .
@@ -114,7 +113,6 @@ The TSB agent interface (`src/mock/tsb_agent_itf.h`) defines:
 
 ## Development Notes
 
-- **Mock vs Production**: Default build uses `USE_MOCK_TSB_AGENT=On` for development. Production builds must set this to Off.
 - **Memory Management**: TSB agent interface uses malloc/free - remember to free allocated memory.
 - **Error Handling**: Comprehensive error codes defined in `tsb_agent_itf.h` and `api/defines.h`.
 - **Logging**: Custom logging adaptation in `base/` with spdlog backend.

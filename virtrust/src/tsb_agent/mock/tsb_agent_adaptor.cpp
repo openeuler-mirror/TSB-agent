@@ -71,6 +71,8 @@ bool CheckVRootStarted(const char *vUuid)
 // NOTE ALL memories are allocated inside APIs by using "mallloc", remeber to
 // free the pointer after use.
 
+extern "C" {
+
 int GetVRoots(int *vtpcmNums, struct Description **vtpcmInfo)
 {
 #ifdef VIRTRUST_MOCK
@@ -424,6 +426,7 @@ int TransDupPub(int type,         // 输入/输入，对应EnDirection中的枚�
         (void)tcm2bLenIn;
     }
 
-
     return 0;
 }
+
+} // extern "C"
