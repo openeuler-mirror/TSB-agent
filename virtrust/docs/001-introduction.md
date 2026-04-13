@@ -147,13 +147,13 @@ make coverage
   - 使用模拟 TSB 代理
   - 启用完整测试套件
   - 便于开发和调试
-  - 需要将`/opt/test_virtrust/libinterfac.so`拷贝到库文件搜索路径，例，`/usr/local/lib64`
+  - 需要将`/opt/test_virtrust/libinterfac.so`拷贝到库文件搜索路径，例，`/usr/lib64`
 
 - **生产模式**：
   - 使用真实 TSB 代理
   - 禁用测试以减小二进制体积
   - 用于生产环境部署
-  - 需要联系[业务管理员](https://gitcode.com/strong-wangzhuang)获取`libinterfac.so`，然后拷贝到库文件搜索路径，例，`/usr/local/lib64`
+  - 需要联系[业务管理员](https://gitcode.com/strong-wangzhuang)获取`libinterfac.so`，然后拷贝到库文件搜索路径，例，`/usr/lib64`
 
 ### 调试支持
 

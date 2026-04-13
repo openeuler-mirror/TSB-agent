@@ -2,7 +2,6 @@
 
 # Mock TSB Agent 编译为共享库 libinterfac.so
 # 使用方式: 将编译出的 libinterfac.so 部署到系统，代替真实的 libinterfac.so 用于测试
-# 编译命令: cmake -DUSE_MOCK_TSB_AGENT=On .. && make interfac
 
 # SO 导出层 + mock 实现
 add_library(interfac SHARED ${CMAKE_CURRENT_LIST_DIR}/tsb_agent_adaptor.cpp
