@@ -72,7 +72,6 @@ bool CheckVRootStarted(const char *vUuid)
 // free the pointer after use.
 
 extern "C" {
-
 int GetVRoots(int *vtpcmNums, struct Description **vtpcmInfo)
 {
 #ifdef VIRTRUST_MOCK
