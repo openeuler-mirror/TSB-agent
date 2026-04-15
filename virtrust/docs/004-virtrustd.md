@@ -40,10 +40,10 @@ libvirt 虚拟化层
 - **权限**：需要足够的权限来管理虚拟机
 - **依赖**：libvirt、gRPC 相关库
 
-
-### 源码安装步骤
+### 源码编译安装步骤
 
 1. **编译安装**：
+
 ```bash
 # 在 virtrust 项目目录下
 cmake -B build -DCMAKE_BUILD_TYPE=Release
@@ -54,28 +54,58 @@ sudo cmake --install build
 ```
 
 2. **创建配置文件**：
+
 ```bash
 sudo mkdir -p /etc/virtrust
 sudo cp test/data/config.json /etc/virtrust/config.json
 ```
 
 3. **创建日志目录**：
+
 ```bash
 sudo mkdir -p /var/log
 sudo touch /var/log/virtrustd.log
 sudo chmod 640 /var/log/virtrustd.log
 ```
 
-### RPM 部署
+4. **使能libvirtrustd服务**：
+
+```bash
+# libvirtrustd使用systemd管理，管理脚本见 src/libvirtrustd/virtrustd-service.sh
+
+用法: ./virtrustd-service.sh {install|uninstall|start|stop|restart|status|logs|enable|disable}
+# 示例:
+./virtrustd-service.sh install    # 安装并启用服务
+./virtrustd-service.sh start      # 启动服务
+./virtrustd-service.sh status     # 查看状态
+./virtrustd-service.sh restart    # 重启服务
+./virtrustd-service.sh logs 100   # 查看最近100行日志
+```
+
+
+### RPM 编译安装步骤（libvirtrustd默认通过systemd管理）
+
 1. **构建 RPM 包**
+
 ```shell
 sh rpm/build_rpm.sh
 ```
+
 2. **安装**
+
 ```shell
 sudo rpm -ivh ~/rpmbuild/RPMS/aarch64/TSB-agent-1.0.0-1.aarch64.rpm
 ```
+
+服务安装时，会主动在 systemd 服务中完成 libvirtrustd 注册，为确保 libvirtrustd 正常运行需要完成以下配置管理：
+```
+a、参考 安全配置-TLS证书管理 章节，生成证书
+
+b、参考 配置管理-配置文件格式 章节，将 a 步骤生成的证书路径配置到 config.json 配置文件中
+```
+
 安装完成后，可在以下位置找到可执行文件、头文件、库文件和配置文件：
+
 ```shell
 # 可执行文件
 /usr/bin/libvirtrustd
@@ -87,27 +117,33 @@ sudo rpm -ivh ~/rpmbuild/RPMS/aarch64/TSB-agent-1.0.0-1.aarch64.rpm
 # 库文件
 /usr/lib64/libvirtrust-shared.so
 
-# 测试验证版TSB库文件
+# 测试验证版TSB库文件，安装完成在程序启动前后拷贝到库文件搜索路径
 /opt/test_virtrust/libinterfac.so
 
 # 示例配置文件
 /etc/virtrust/config.json
+
+# systemd服务文件
+/usr/lib/systemd/system/libvirtrustd.service
 ```
+
 3. **卸载**
+
 ```shell
 rpm -e TSB-agent
 ```
+
 ## 配置管理
 
 ### 配置文件格式
 
-配置文件使用 JSON 格式，包含以下字段：
+配置文件使用 JSON 格式，当前为示例内容，实际使用时需要根据证书的路径适配修改，包含以下字段：
 
 ```json
 {
-    "caPath": "ca-cert.pem",
-    "certPath": "server-cert.pem",
-    "skPath": "server-sk.pem",
+    "caPath": "/etc/virtrust/certs/ca-cert.pem",
+    "certPath": "/etc/virtrust/certs/server-cert.pem",
+    "skPath": "/etc/virtrust/certs/server-key.pem",
     "ip": "127.0.0.1"
 }
 ```
@@ -116,12 +152,13 @@ rpm -e TSB-agent
 
 - `ca_path`：CA 证书文件路径
 - `cert_path`：服务器证书文件路径
-- `sk_path`：服务器私钥文件路径，默认为 "server-sk.pem"
+- `sk_path`：服务器私钥文件路径，默认为 "server-key.pem"
 - `ip`：服务器监听地址，默认为 "127.0.0.1"
 
 ## 运行和管理
 
-### 启动服务
+### libvirtrustd运行管理
+**启动命令**
 
 ```bash
 # 基础启动
@@ -131,39 +168,22 @@ sudo libvirtrustd --config /etc/virtrust/config.json
 sudo libvirtrustd -d --config /etc/virtrust/config.json
 ```
 
-### 命令行选项
+**命令行选项**
 
-| 选项 | 长选项 | 参数 | 描述 |
-|------|--------|------|------|
-| 无 | `--config` | 文件路径 | 配置文件路径（必需） |
-| `-d` | `--debug` | 无 | 启用调试模式 |
-| 无 | `--help` | 无 | 显示帮助信息 |
-| 无 | `--version` | 无 | 显示版本信息 |
+| 选项   | 长选项         | 参数   | 描述         |
+| ---- | ----------- | ---- | ---------- |
+| 无    | `--config`  | 文件路径 | 配置文件路径（必需） |
+| `-d` | `--debug`   | 无    | 启用调试模式     |
+| 无    | `--help`    | 无    | 显示帮助信息     |
+| 无    | `--version` | 无    | 显示版本信息     |
 
-### 系统服务配置
+### 系统服务管理
 
-创建 systemd 服务文件 `/etc/systemd/system/virtrustd.service`：
-
-```ini
-[Unit]
-Description=Virtrust Daemon
-After=network.target libvirtd.service
-Wants=libvirtd.service
-
-[Service]
-Type=simple
-User=root
-Group=root
-ExecStart=/usr/local/bin/virtrustd --config /etc/virtrust/virtrustd.json
-ExecReload=/bin/kill -HUP $MAINPID
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
+**systemd 服务文件**：
+见 `../src/libvirtrustd/virtrustd.service`
 
 **服务管理命令**：
+
 ```bash
 # 重新加载 systemd 配置
 sudo systemctl daemon-reload
@@ -187,7 +207,7 @@ sudo systemctl enable virtrustd
 sudo systemctl disable virtrustd
 ```
 
-### 服务状态监控
+**服务状态监控**
 
 ```bash
 # 检查服务是否运行
@@ -234,7 +254,9 @@ sudo journalctl -u virtrustd --since "1 hour ago" -p err
 ## 安全配置
 
 ### TLS 证书管理
+
 以下是生成grpc服务证书的示例， 开源规范允许私钥可以使用明文存储，因此生成的私钥文件暂时未使用口令保护，有其他需要可以以该脚本作为基础进行修改
+
 ```bash
 #!/bin/bash
 openssl genrsa -out ca-key.pem 2048
@@ -258,11 +280,13 @@ openssl x509 -req -days 365 -in server-req.pem -CA ca-cert.pem \
 mkdir -p  /etc/virtrust/certs/
 sudo mv ca-cert.pem server-cert.pem server-key.pem /etc/virtrust/certs/
 ```
+
 ```
  注意： 生成证书之后，再拷贝到其他服务器节点
 ```
 
-4. **libvirt证书**：
+### libvirt证书
+
 ```bash
 # 该脚本仅提供证书及私钥生成的示例，不对安全性负责。
 # 以下方式生成的私钥文件未使用口令保护，有安全性问题，若需要口令保护请修改脚本。
@@ -417,7 +441,9 @@ sudo firewall-cmd --reload
 ```
 
 ### 通信矩阵
-| Source Device | Source IP      | Source Port | Destination Device | Destination IP      | Destination Port | Protocol | Is Listening Port Configurable | Authentication | Encryption  |
-| ------------- | -------------- |-------------| ------------------ | ------------------- | ---------------- | -------- | ------------------------------ | -------------- | ----------- |
-| Source Node   | Source host IP | Random port allocated by the system     | Destination Node   | Destination host IP | 5031             | TCP      | No                             | Certificate    | TLS 1.2/1.3 |
-| Source Node   | Source host IP | Random port allocated by the system     | Destination Node   | Destination host IP | 16514            | TCP      | Yes                            | Certificate    | TLS 1.2/1.3 |
+
+| Source Device | Source IP      | Source Port                         | Destination Device | Destination IP      | Destination Port | Protocol | Is Listening Port Configurable | Authentication | Encryption  |
+| ------------- | -------------- | ----------------------------------- | ------------------ | ------------------- | ---------------- | -------- | ------------------------------ | -------------- | ----------- |
+| Source Node   | Source host IP | Random port allocated by the system | Destination Node   | Destination host IP | 5031             | TCP      | No                             | Certificate    | TLS 1.2/1.3 |
+| Source Node   | Source host IP | Random port allocated by the system | Destination Node   | Destination host IP | 16514            | TCP      | Yes                            | Certificate    | TLS 1.2/1.3 |
+

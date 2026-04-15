@@ -1,0 +1,126 @@
+# ============================================================
+# systemd Service Unit 文件
+# 用于 systemd 管理 libvirtrustd 守护进程
+#
+# 部署位置: /usr/lib/systemd/system/libvirtrustd.service
+# 管理命令: systemctl start/stop/restart/status libvirtrustd
+# ============================================================
+
+[Unit]
+# 服务描述信息
+Description=Virtrust Daemon Service
+
+# 官方文档链接
+Documentation=https://gitee.com/openeuler/TSB-agent/virtrust/docs/004-virtrustd.md
+
+# 启动顺序依赖：
+# - network.target: 网络就绪后再启动
+# - libvirtd.service: 在 libvirtd 服务之后启动
+# systemd 会等待这些服务就绪后再启动我们的服务
+After=network.target libvirtd.service
+
+# 弱依赖关系：如果 libvirtd 启动失败，不影响本服务启动
+# 但会先尝试启动 libvirtd（如果它在启动中）
+Wants=libvirtd.service
+
+[Service]
+# 启动类型：
+# - simple: 进程不会fork，主进程即服务进程（最简单模式）
+# - forking: 进程会fork，子进程为主服务进程（适合传统守护进程）
+# - oneshot: 一次性任务，执行完就退出（适合初始化脚本）
+Type=simple
+
+# 运行用户和组：建议创建专用用户替代 root
+User=root
+Group=root
+
+# ExecStart: 启动命令（必需）
+# systemd 会 fork 后执行此命令，使用 Type=simple 时 MainPID 就是此进程
+ExecStart=/usr/bin/libvirtrustd --config /etc/virtrust/config.json
+
+# 自动重启策略：
+# - on-failure: 进程异常退出（非零退出码、SIGABRT等）时重启
+# - always: 任何退出都重启
+# - on-abnormal: 被信号杀死、超时等异常情况重启
+Restart=on-failure
+
+# ExecReload: 热重载配置命令
+# 发送 SIGHUP 信号通知进程重新加载配置（优雅重启）
+# $MAINPID 是 systemd 自动变量，表示主进程 PID
+ExecReload=/bin/kill -HUP $MAINPID
+
+# ExecStop: 优雅停止命令
+# 发送 SIGTERM 信号请求进程正常退出
+ExecStop=/bin/kill -SIGTERM $MAINPID
+
+# 两次重启之间的间隔（避免频繁重启）
+RestartSec=5s
+
+# 启动超时时间：如果进程在此时间内未进入 "started" 状态，则判定失败
+TimeoutStartSec=30
+
+# 停止超时时间：如果进程在此时间内未完全退出，则强制杀死
+TimeoutStopSec=30
+
+# 允许读写的数据目录（ProtectSystem 会限制这些目录）
+# 用于存放运行时数据、配置、日志
+# 不能限制，会出现226/NAMESPACE的错误
+# ReadWritePaths=/etc/virtrust /var/log/virtrust /var/run
+
+# 安全加固 - 文件系统访问限制：
+# - ProtectSystem=strict: 禁止访问 /usr、/boot、/etc 只读
+#   只能访问 /dev、/proc、/sys（部分）、/var（运行时）
+# - ProtectHome=true: 禁止访问 /home、/root、/run/user
+#   防止服务被攻击后访问用户数据
+ProtectSystem=false
+ProtectHome=false
+
+# PrivateTmp=true:
+# 为服务创建私有 /tmp 和 /var/tmp 命名空间
+# 防止服务被攻击后访问其他进程的临时文件
+PrivateTmp=false
+
+# 资源限制：
+# - LimitNOFILE: 最大打开文件描述符数量（65536=64K）
+#   影响同时打开的socket数量、文件数量
+# - LimitNPROC: 最大进程/线程数量
+LimitNOFILE=65536
+LimitNPROC=4096
+
+# 日志输出配置：
+# - StandardOutput=journal: 标准输出写入 systemd journal
+# - StandardError=journal: 标准错误输出写入 systemd journal
+# 可用 journalctl -u libvirtrustd 查看日志
+StandardOutput=journal
+StandardError=journal
+
+# SyslogIdentifier: 在 journal 日志中的标识符
+# 便于过滤：journalctl -t libvirtrustd
+SyslogIdentifier=libvirtrustd
+
+# NoNewPrivileges=true:
+# 禁止服务通过 setuid/setgid 或 caps 获得新权限
+# 防止容器逃逸等安全威胁
+NoNewPrivileges=true
+
+# 环境变量：传递给进程的配置参数
+# TSB_AGENT_SO_MODE: 指定加载 mock SO 还是真实 SO
+# LOG_LEVEL: 日志级别
+Environment="TSB_AGENT_SO_MODE=mock"
+Environment="LOG_LEVEL=info"
+
+[Install]
+# 安装配置：指定服务在什么运行级别下启用
+
+# multi-user.target: 多用户命令行模式（类似于 Linux 运行级别 3）
+# 这是大多数服务器的标准目标，不启动图形界面
+#
+# 其他常用目标：
+# - graphical.target: 图形界面模式（类似运行级别 5）
+# - multi-user.target: 多用户命令行（类似运行级别 3）
+# - runlevel3.target: 同 multi-user.target
+#
+# systemctl enable libvirtrustd 会创建符号链接：
+# /etc/systemd/system/multi-user.target.wants/libvirtrustd.service
+# -> /usr/lib/systemd/system/libvirtrustd.service
+WantedBy=multi-user.target

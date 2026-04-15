@@ -113,6 +113,8 @@ int ProcessArgs(int argc, char **argv)
         }
         sever.Stop();
     } else {
+        fmt::print("\n"
+                   "  ERROR: Failed to parse config files\n");
         // make link config failed
         return 1;
     }
