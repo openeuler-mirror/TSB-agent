@@ -87,6 +87,9 @@ sudo rpm -ivh ~/rpmbuild/RPMS/aarch64/TSB-agent-1.0.0-1.aarch64.rpm
 # 库文件
 /usr/lib64/libvirtrust-shared.so
 
+# 测试验证版TSB库文件
+/opt/test_virtrust/libinterfac.so
+
 # 示例配置文件
 /etc/virtrust/config.json
 ```
