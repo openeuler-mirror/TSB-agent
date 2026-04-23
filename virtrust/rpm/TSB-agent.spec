@@ -14,9 +14,11 @@ Source5:        libboundscheck.tar.gz
 
 BuildRequires:  gcc, make, libboundscheck
 BuildRequires:  gcc-c++ >= 7, cmake >= 3.14, grpc, grpc-devel, grpc-plugins, protobuf-devel, protobuf-compiler
+BuildRequires:  systemd
 
 # Runtime Requires
 Requires:       libvirt-devel, libxml2-devel, openssl-devel, libguestfs-devel
+Requires:       systemd
 
 %global __requires_exclude libinterfac\.so
 
@@ -94,6 +96,7 @@ install -d -m 750 %{buildroot}%{_includedir}/virtrust
 install -d -m 750 %{buildroot}%{_includedir}/virtrust/api
 install -d -m 750 %{buildroot}%{_includedir}/virtrust/base
 install -d -m 750 %{buildroot}%{_sysconfdir}/virtrust
+install -d -m 750 %{buildroot}%{_unitdir}
 
 # Library files
 install -m 550 %{output_dir}/lib64/libvirtrust-shared.so        %{buildroot}%{_libdir}
@@ -110,6 +113,9 @@ install -m 440 %{output_dir}/include/virtrust/base/*.h          %{buildroot}%{_i
 # Configuration files
 install -pm 640 %{root_dir}/test/data/config.json               %{buildroot}%{_sysconfdir}/virtrust/config.json
 
+# systemd service file
+install -m 640 %{root_dir}/src/libvirtrustd/libvirtrustd.service             %{buildroot}%{_unitdir}/libvirtrustd.service
+
 %files
 %dir %attr(0750, root, root) %{_sysconfdir}/virtrust/
 %config %attr(0640, root, root) %{_sysconfdir}/virtrust/config.json
@@ -120,8 +126,19 @@ install -pm 640 %{root_dir}/test/data/config.json               %{buildroot}%{_s
 %{_bindir}/libvirtrustd
 %{_includedir}/virtrust/api/*.h
 %{_includedir}/virtrust/base/*.h
+%{_unitdir}/libvirtrustd.service
 
 %post
 /sbin/ldconfig
+
+%posttrans
+systemctl daemon-reload 2>/dev/null || true
+
+%postun
+if [ $1 -eq 0 ] ; then
+    systemctl --quiet stop libvirtrustd.service 2>/dev/null || true
+    systemctl --quiet disable libvirtrustd.service 2>/dev/null || true
+    systemctl daemon-reload 2>/dev/null || true
+fi
 
 %changelog
