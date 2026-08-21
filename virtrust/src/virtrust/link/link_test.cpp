@@ -4,9 +4,9 @@
 
 #include <filesystem>
 #include <future>
+#include <fmt/format.h>
 
 #include "gtest/gtest.h"
-#include "spdlog/fmt/bundled/core.h"
 
 #include "virtrust/link/link_client.h"
 #include "virtrust/link/link_config_builder.h"

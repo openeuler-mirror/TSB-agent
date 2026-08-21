@@ -48,63 +48,28 @@ tar -C "$TMPDIR" -czf "$SRC_TARBALL" "${PKG_NAME}-${PKG_VERSION}"
 rm -rf "$TMPDIR"
 trap - EXIT
 
-echo "==> Downloading dependency archives into: $DEST_DIR"
-# Helper: curl or wget
-_fetch() {
-  local url="$1" out="$2"
-  if [[ -f "$out" ]]; then
-    echo "[skip] $out already exists"
-    return
-  fi
-  if command -v curl >/dev/null 2>&1; then
-    curl -L --fail --retry 3 -o "$out" "$url"
-  elif command -v wget >/dev/null 2>&1; then
-    wget -O "$out" "$url"
-  else
-    echo "ERROR: Neither curl nor wget found for downloading $url" >&2
-    return 1
-  fi
-}
-
-# 依赖下载地址：与 cmake/deps/*.cmake 中的 gitee 源保持一致。
-# 注意：仅更改下载源，不更改本地保存的文件名，以便与 .spec 中的 Source1..N 对齐。
-# - gtest:      gitee.com/mirrors/googletest.git (tag: v1.15.2)
-# - openssl:    gitee.com/mirrors/openssl.git    (tag: openssl-3.3.2)
-# - rapidjson:  gitee.com/Tencent/RapidJSON.git  (tag: v1.1.0)
-# - spdlog:     gitee.com/mirrors_trending/spdlog.git (tag: v1.14.1)
-# - libboundscheck: gitee.com/openeuler/libboundscheck (branch: master)
-
-# Gitee 通用归档下载路径格式：
-#   https://gitee.com/<org>/<repo>/repository/archive/<ref>.tar.gz
-
-GTEST_URL="https://gitee.com/mirrors/googletest/repository/archive/v1.15.2.tar.gz"
-OPENSSL_URL="https://gitee.com/mirrors/openssl/repository/archive/openssl-3.3.2.tar.gz"
-RAPIDJSON_URL="https://gitee.com/Tencent/RapidJSON/repository/archive/v1.1.0.tar.gz"
-SPDLOG_URL="https://gitee.com/mirrors_trending/spdlog/repository/archive/v1.14.1.tar.gz"
-LIBBOUNDSCHECK_URL="https://gitee.com/openeuler/libboundscheck/repository/archive/master.tar.gz"
-
-# Output file names for SourceN (keep in sync with spec!)
+# Only googletest is fetched; other deps (openssl/spdlog/libboundscheck/
+# rapidjson) come from the system yum packages (see spec BuildRequires).
+# gtest is cloned from gitcode (no archive download available), then packed.
+GTEST_GIT_URL="https://gitcode.com/GitHub_Trending/go/googletest"
+GTEST_TAG="v1.15.2"
 GTEST_OUT="$DEST_DIR/googletest-v1.15.2.tar.gz"
-OPENSSL_OUT="$DEST_DIR/openssl-3.3.2.tar.gz"
-RAPIDJSON_OUT="$DEST_DIR/rapidjson-v1.1.0.tar.gz"
-SPDLOG_OUT="$DEST_DIR/spdlog-v1.14.1.tar.gz"
-LIBBOUNDSCHECK_OUT="$DEST_DIR/libboundscheck.tar.gz"
 
-_fetch "$GTEST_URL" "$GTEST_OUT"
-_fetch "$OPENSSL_URL" "$OPENSSL_OUT"
-_fetch "$RAPIDJSON_URL" "$RAPIDJSON_OUT"
-_fetch "$SPDLOG_URL" "$SPDLOG_OUT"
-_fetch "$LIBBOUNDSCHECK_URL" "$LIBBOUNDSCHECK_OUT"
+if [[ -f "$GTEST_OUT" ]]; then
+  echo "[skip] $GTEST_OUT already exists"
+else
+  echo "==> Cloning googletest from gitcode (tag: $GTEST_TAG)"
+  GIT_TMP=$(mktemp -d)
+  git clone --depth 1 --branch "$GTEST_TAG" "$GTEST_GIT_URL" "$GIT_TMP/googletest"
+  tar -C "$GIT_TMP" --exclude='.git' -czf "$GTEST_OUT" googletest
+  rm -rf "$GIT_TMP"
+fi
 
 echo "==> Generating checksums"
 MANIFEST="$DEST_DIR/${PKG_NAME}-${PKG_VERSION}-sources.SHA256"
 {
   sha256sum "$SRC_TARBALL" || true
   sha256sum "$GTEST_OUT" || true
-  sha256sum "$OPENSSL_OUT" || true
-  sha256sum "$RAPIDJSON_OUT" || true
-  sha256sum "$SPDLOG_OUT" || true
-  sha256sum "$LIBBOUNDSCHECK_OUT" || true
 } > "$MANIFEST"
 
 echo "==> Preparing rpmbuild tree"
@@ -128,10 +93,6 @@ All done.
   - Source0: $SRC_TARBALL
   - Extra sources:
       $GTEST_OUT
-      $OPENSSL_OUT
-      $RAPIDJSON_OUT
-      $SPDLOG_OUT
-      $LIBBOUNDSCHECK_OUT
   - Checksums: $MANIFEST
   - RPMs in:  $RPMBUILD_ROOT/RPMS
   - SRPM in:  $RPMBUILD_ROOT/SRPMS

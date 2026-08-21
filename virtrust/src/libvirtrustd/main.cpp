@@ -4,13 +4,13 @@
 
 #include <getopt.h>
 #include <unistd.h>
+#include <fmt/format.h>
 
 #include <csignal>
 #include <thread>
 
 #include "libvirtrustd/defines.h"
 #include "libvirtrustd/utils.h"
-#include "spdlog/fmt/bundled/core.h"
 
 #include "virtrust/base/logger.h"
 #include "virtrust/link/defines.h"

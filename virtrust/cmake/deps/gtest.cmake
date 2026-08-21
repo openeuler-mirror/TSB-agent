@@ -27,14 +27,10 @@ if(EXISTS "${_gtest_src}")
 else()
   ExternalProject_Add(
     googletest
-    # use gitee first
-    GIT_REPOSITORY https://gitee.com/mirrors/googletest.git
+    # use gitcode first
+    GIT_REPOSITORY https://gitcode.com/GitHub_Trending/go/googletest
     GIT_TAG v1.15.2
     GIT_SHALLOW On
-    # alternatively, download through gitub
-    URL https://github.com/google/googletest/archive/refs/tags/v1.15.2.tar.gz
-    URL_HASH
-      SHA256=7b42b4d6ed48810c5362c265a17faebe90dc2373c885e5216439d37927f02926
     CMAKE_ARGS -DCMAKE_POSITION_INDEPENDENT_CODE=On #
                -DCMAKE_CXX_STANDARD=17 #
                -DCMAKE_C_STANDARD_REQUIRED=Yes #
@@ -49,7 +45,6 @@ else()
     BUILD_BYPRODUCTS
       ${CMAKE_DEPS_LIBDIR}/libgmock_main${CMAKE_STATIC_LIBRARY_SUFFIX}
     EXCLUDE_FROM_ALL true
-    DOWNLOAD_EXTRACT_TIMESTAMP On
     LOG_DOWNLOAD On
     LOG_CONFIGURE On
     LOG_BUILD On

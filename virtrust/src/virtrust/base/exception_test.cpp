@@ -2,8 +2,8 @@
  * Copyright (C) Huawei Technologies Co., Ltd. 2025-2025.All rights reserved.
  */
 
+#include <fmt/format.h>
 #include "gtest/gtest.h"
-#include "spdlog/fmt/bundled/core.h"
 
 #include "virtrust/base/exception.h"
 #include "virtrust/base/logger.h"

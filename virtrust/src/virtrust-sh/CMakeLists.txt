@@ -24,4 +24,5 @@ target_include_directories(
   virtrust-sh PRIVATE $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src>
                       ${CMAKE_DEPS_INCLUDEDIR})
 
-target_link_libraries(virtrust-sh PRIVATE virtrust-sh-obj virtrust-shared)
+target_link_libraries(virtrust-sh PRIVATE virtrust-sh-obj virtrust-shared
+                                      Deps::spdlog)
