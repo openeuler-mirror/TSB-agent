@@ -210,6 +210,7 @@ MigrateSessionRc MigrationSession::OnStartMigrationResponseReceived()
     if (ret != 0 || cipher == nullptr) {
         if (cipher != nullptr) {
             free(cipher);
+            cipher = nullptr;
         }
         VIRTRUST_LOG_ERROR(
             "|OnStartMigrationResponseReceived|END|returnF|domain name: {}|TSB: MigrationGetVRootCipher failed.",
@@ -224,6 +225,7 @@ MigrateSessionRc MigrationSession::OnStartMigrationResponseReceived()
 
     std::string cipherStr(cipher, cipherLen);
     free(cipher);
+    cipher = nullptr;
 
     // 收集虚机描述信息
     Description vmInfo;
@@ -347,9 +349,11 @@ MigrateSessionRc MigrationSession::GetExchangePkAndReport(protos::EXchangePkAndR
     if (ret != 0 || cert == nullptr || pubKey == nullptr) {
         if (cert != nullptr) {
             free(cert);
+            cert = nullptr;
         }
         if (pubKey != nullptr) {
             free(pubKey);
+            pubKey = nullptr;
         }
         VIRTRUST_LOG_ERROR("|GetExchangePkAndReport|END|returnF|domain name: {}|TSB: MigrationGetCert failed.",
                            domainName_);
@@ -360,7 +364,9 @@ MigrateSessionRc MigrationSession::GetExchangePkAndReport(protos::EXchangePkAndR
     std::string certStr(cert, certLen);
     std::string pubKeyStr(pubKey, pubKeyLen);
     free(cert);
+    cert = nullptr;
     free(pubKey);
+    pubKey = nullptr;
 
     VIRTRUST_LOG_DEBUG("|domain name: {}|TSB: GetReport start.", domainName_);
     trust_report_new hostReport;

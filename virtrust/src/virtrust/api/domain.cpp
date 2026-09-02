@@ -206,26 +206,32 @@ bool ConvertTsbStruct(const VirshMeasureInfo &src, struct MeasureInfo *&target)
     return true;
 }
 
-void FreeMeasureInfo(struct MeasureInfo *bios, struct MeasureInfo *shim, struct MeasureInfo *grub,
-                     struct MeasureInfo *grubCfg, struct MeasureInfo *kernel, struct MeasureInfo *initrd)
+void FreeMeasureInfo(struct MeasureInfo **bios, struct MeasureInfo **shim, struct MeasureInfo **grub,
+                     struct MeasureInfo **grubCfg, struct MeasureInfo **kernel, struct MeasureInfo **initrd)
 {
-    if (bios != nullptr) {
-        free(bios);
+    if (bios != nullptr && *bios != nullptr) {
+        free(*bios);
+        *bios = nullptr;
     }
-    if (shim != nullptr) {
-        free(shim);
+    if (shim != nullptr && *shim != nullptr) {
+        free(*shim);
+        *shim = nullptr;
     }
-    if (grub != nullptr) {
-        free(grub);
+    if (grub != nullptr && *grub != nullptr) {
+        free(*grub);
+        *grub = nullptr;
     }
-    if (grubCfg != nullptr) {
-        free(grubCfg);
+    if (grubCfg != nullptr && *grubCfg != nullptr) {
+        free(*grubCfg);
+        *grubCfg = nullptr;
     }
-    if (kernel != nullptr) {
-        free(kernel);
+    if (kernel != nullptr && *kernel != nullptr) {
+        free(*kernel);
+        *kernel = nullptr;
     }
-    if (initrd != nullptr) {
-        free(initrd);
+    if (initrd != nullptr && *initrd != nullptr) {
+        free(*initrd);
+        *initrd = nullptr;
     }
 }
 
@@ -253,7 +259,7 @@ bool CheckGuestBeforeStart(std::string_view domainName, std::string &uuid, std::
                ConvertTsbStruct(measureSummary.grub, grub) && ConvertTsbStruct(measureSummary.grubCfg, grubCfg);
     if (!res) {
         VIRTRUST_LOG_ERROR("convert tsb struct failed:{}", domainName);
-        FreeMeasureInfo(bios, shim, grub, grubCfg, kernel, initrd);
+        FreeMeasureInfo(&bios, &shim, &grub, &grubCfg, &kernel, &initrd);
         return false;
     }
     // 检查度量值是否通过
@@ -263,7 +269,7 @@ bool CheckGuestBeforeStart(std::string_view domainName, std::string &uuid, std::
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
     VIRTRUST_LOG_DEBUG("|CheckGuestBeforeStart||calc time-consuming, target: func_checkMeasure, duration:{} ms",
                        duration.count());
-    FreeMeasureInfo(bios, shim, grub, grubCfg, kernel, initrd);
+    FreeMeasureInfo(&bios, &shim, &grub, &grubCfg, &kernel, &initrd);
 
     if (tsbRc == IMPORT_BM_FAILURE) {
         VIRTRUST_LOG_ERROR("|CheckGuestBeforeStart|End|returnF|domainName:{}|CheckMeasure: import failed", domainName);
@@ -294,11 +300,11 @@ bool UpdateMeasure(std::string_view domainName, std::string &uuid)
                ConvertTsbStruct(measureSummary.kernel, kernel) && ConvertTsbStruct(measureSummary.initrd, initrd) &&
                ConvertTsbStruct(measureSummary.grub, grub) && ConvertTsbStruct(measureSummary.grubCfg, grubCfg);
     if (!res) {
-        FreeMeasureInfo(bios, shim, grub, grubCfg, kernel, initrd);
+        FreeMeasureInfo(&bios, &shim, &grub, &grubCfg, &kernel, &initrd);
         return false;
     }
     auto tsbRc = UpdateMeasure(uuid.data(), bios, shim, grub, grubCfg, kernel, initrd);
-    FreeMeasureInfo(bios, shim, grub, grubCfg, kernel, initrd);
+    FreeMeasureInfo(&bios, &shim, &grub, &grubCfg, &kernel, &initrd);
     if (tsbRc != 0) {
         VIRTRUST_LOG_ERROR("update tsb measure failed:{}", domainName);
         return false;
