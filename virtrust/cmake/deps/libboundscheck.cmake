@@ -1,52 +1,22 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
 
-set(_libboundscheck_src "${CMAKE_DEPS_SRCDIR}/libboundscheck-src")
-if(EXISTS "${_libboundscheck_src}")
-  message(STATUS "Using local source for libboundscheck: ${_libboundscheck_src}")
-  ExternalProject_Add(
-    libboundscheck-src
-    PREFIX ${CMAKE_DEPS_PREFIX}
-    SOURCE_DIR ${_libboundscheck_src}
-    CONFIGURE_COMMAND ""
-    BUILD_COMMAND ${CMAKE_MAKE_PROGRAM}
-    DOWNLOAD_COMMAND ""
-    UPDATE_COMMAND ""
-    INSTALL_COMMAND cp include/securec.h ${CMAKE_DEPS_INCLUDEDIR}
-    COMMAND cp include/securectype.h ${CMAKE_DEPS_INCLUDEDIR}
-    COMMAND cp lib/libboundscheck${CMAKE_SHARED_LIBRARY_SUFFIX}
-            ${CMAKE_DEPS_LIBDIR}
-    BUILD_IN_SOURCE On
-    EXCLUDE_FROM_ALL true
-    LOG_CONFIGURE On
-    LOG_BUILD On
-    LOG_INSTALL On)
-else()
-  ExternalProject_Add(
-    libboundscheck-src
-    GIT_REPOSITORY https://gitcode.com/openeuler/libboundscheck
-    GIT_TAG master
-    GIT_SHALLOW On
-    PREFIX ${CMAKE_DEPS_PREFIX}
-    CONFIGURE_COMMAND ""
-    BUILD_COMMAND ${CMAKE_MAKE_PROGRAM}
-    UPDATE_COMMAND ""
-    INSTALL_COMMAND cp include/securec.h ${CMAKE_DEPS_INCLUDEDIR}
-    COMMAND cp include/securectype.h ${CMAKE_DEPS_INCLUDEDIR}
-    COMMAND cp lib/libboundscheck${CMAKE_SHARED_LIBRARY_SUFFIX}
-            ${CMAKE_DEPS_LIBDIR}
-    BUILD_IN_SOURCE On
-    EXCLUDE_FROM_ALL true
-    LOG_DOWNLOAD On
-    LOG_CONFIGURE On
-    LOG_BUILD On
-    LOG_INSTALL On)
+# libboundscheck is provided by the system package (yum: libboundscheck).
+# NOTE the base package already ships headers and the shared library.
+find_path(BOUNDSCHECK_INCLUDE_DIR securec.h
+          DOC "System libboundscheck headers (package: libboundscheck)")
+find_library(BOUNDSCHECK_LIBRARY boundscheck
+             DOC "System libboundscheck library (package: libboundscheck)")
+if(NOT BOUNDSCHECK_INCLUDE_DIR OR NOT BOUNDSCHECK_LIBRARY)
+  message(
+    FATAL_ERROR "libboundscheck not found, please install libboundscheck first")
 endif()
+message(
+  STATUS
+    "Using system libboundscheck: headers=${BOUNDSCHECK_INCLUDE_DIR} lib=${BOUNDSCHECK_LIBRARY}")
 
 add_library(libboundscheck-itf INTERFACE)
-target_link_directories(libboundscheck-itf INTERFACE ${CMAKE_DEPS_LIBDIR})
-target_link_libraries(libboundscheck-itf
-                      INTERFACE libboundscheck${CMAKE_SHARED_LIBRARY_SUFFIX})
-add_dependencies(libboundscheck-itf libboundscheck-src)
+target_include_directories(libboundscheck-itf INTERFACE ${BOUNDSCHECK_INCLUDE_DIR})
+target_link_libraries(libboundscheck-itf INTERFACE ${BOUNDSCHECK_LIBRARY})
 
 # -----------------------------
 # Alias Target for External Use

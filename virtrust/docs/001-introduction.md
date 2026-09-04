@@ -14,9 +14,11 @@ virtrust 是一个为 openEuler 24.03 LTS SP2 平台设计的可信安全启动�
 ## 环境要求
 
 ### 支持的操作系统
+
 - openEuler 24.03 SP2
 
 ### 用户权限
+
 命令行工具`virtrust-sh`和守护进程`libvirtrustd`都需以`root`权限运行。
 
 ### 编译依赖
@@ -30,12 +32,10 @@ sudo dnf install grpc grpc-devel grpc-plugins protobuf-devel protobuf-compiler
 sudo dnf install libboundscheck
 
 # 运行时依赖
-sudo dnf install libxml2-devel libguestfs-devel openssl-devel libvirt-devel
+sudo dnf install libxml2-devel libguestfs-devel openssl-devel libvirt-devel rapidjson-devel spdlog-devel
 
 # 其他依赖（项目会自动下载）
-# - spdlog（日志）
 # - gtest（测试框架）
-# - rapidjson（JSON解析）
 ```
 
 注意：由于 edk2-aarch64 性能问题，建议用户使用 openEuler 24.03 SP2 操作系统时，执行以下操作
@@ -144,12 +144,13 @@ make coverage
 ### 开发模式 vs 生产模式
 
 - **开发模式**（默认）：
+
   - 使用模拟 TSB 代理
   - 启用完整测试套件
   - 便于开发和调试
   - 需要将`/opt/test_virtrust/libinterfac.so`拷贝到库文件搜索路径，例，`/usr/lib64`
-
 - **生产模式**：
+
   - 使用真实 TSB 代理
   - 禁用测试以减小二进制体积
   - 用于生产环境部署

@@ -6,7 +6,9 @@
 
 #include <sys/stat.h>
 
+#include <climits>
 #include <iostream>
+#include <unistd.h>
 
 #include "spdlog/sinks/rotating_file_sink.h"
 #include "spdlog/sinks/stdout_sinks.h"

@@ -7,18 +7,14 @@ License:        MulanPSL-2.0
 URL:            https://gitcode.com/openeuler/TSB-agent
 Source0:        %{name}-%{version}.tar.gz
 Source1:        googletest-v1.15.2.tar.gz
-Source2:        openssl-3.3.2.tar.gz
-Source3:        rapidjson-v1.1.0.tar.gz
-Source4:        spdlog-v1.14.1.tar.gz
-Source5:        libboundscheck.tar.gz
 
-BuildRequires:  gcc, make, libboundscheck
+BuildRequires:  gcc, make, libboundscheck, rapidjson-devel, openssl-devel, spdlog-devel
 BuildRequires:  gcc-c++ >= 7, cmake >= 3.14, grpc, grpc-devel, grpc-plugins, protobuf-devel, protobuf-compiler
 BuildRequires:  systemd
 
 # Runtime Requires
 Requires:       libvirt-devel, libxml2-devel, openssl-devel, libguestfs-devel
-Requires:       systemd
+Requires:       systemd, libboundscheck, rapidjson-devel, spdlog-devel
 
 %global __requires_exclude libinterfac\.so
 
@@ -39,30 +35,12 @@ virtualization scenarios on openEuler.
 %prep
 %autosetup -n %{name}-%{version}
 
-# Extract dependency packages to directories expected by CMake: build/deps/src
-# Note: Directory names must match ExternalProject names in cmake/deps/*.cmake
-#   - googletest
-#   - openssl (BUILD_IN_SOURCE On)
-#   - rapidjson
-#   - spdlog
-#   - libboundscheck-src
+# Extract googletest to the directory expected by cmake/deps/gtest.cmake
 DEPS_SRC="%{build_dir}/deps/src"
 mkdir -p "$DEPS_SRC"
 
 mkdir -p "$DEPS_SRC/googletest"
 tar -xzf %{SOURCE1} -C "$DEPS_SRC/googletest" --strip-components=1
-
-mkdir -p "$DEPS_SRC/openssl"
-tar -xzf %{SOURCE2} -C "$DEPS_SRC/openssl" --strip-components=1
-
-mkdir -p "$DEPS_SRC/rapidjson"
-tar -xzf %{SOURCE3} -C "$DEPS_SRC/rapidjson" --strip-components=1
-
-mkdir -p "$DEPS_SRC/spdlog"
-tar -xzf %{SOURCE4} -C "$DEPS_SRC/spdlog" --strip-components=1
-
-mkdir -p "$DEPS_SRC/libboundscheck-src"
-tar -xzf %{SOURCE5} -C "$DEPS_SRC/libboundscheck-src" --strip-components=1
 
 %global root_dir               %{_builddir}/%{name}-%{version}
 %global build_dir              %{_builddir}/%{name}-%{version}/build

@@ -7,8 +7,7 @@
 #include <string>
 
 // NOTE DO NOT REMOVE this chrono header
-#include "spdlog/fmt/bundled/chrono.h"
-#include "spdlog/fmt/bundled/core.h"
+#include <fmt/chrono.h>
 
 #include "virtrust/base/log_adapt.h"
 #include "virtrust/utils/enum_check.h"

@@ -102,7 +102,9 @@ macro(set_toolchain_flags)
     add_compiler_flags(-O2)
     add_compiler_flags(-ftrapv)
 
-    add_linker_flags(-pie)
+    # NOTE -pie only applies to executables; add_link_options(-pie) would
+    # break shared library links, so set it on EXE_LINKER_FLAGS instead
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -pie")
     add_linker_flags(-s)
     add_linker_flags(-Wl,-z,relro,-z,now)
     add_linker_flags(-Wl,-z,noexecstack)

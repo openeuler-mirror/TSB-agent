@@ -25,10 +25,11 @@ target_include_directories(
           # for pb headers
           ${CMAKE_BINARY_DIR}/src ${CMAKE_CURRENT_BINARY_DIR})
 
+# usage requirements (include dirs + compile defs) for spdlog/securec headers
+target_link_libraries(virtrust-obj PRIVATE Deps::spdlog Deps::secure_c)
+
 # HACK make sure proto builds before obj
 add_dependencies(virtrust-obj virtrust_proto)
-add_dependencies(virtrust-obj Deps::spdlog)
-add_dependencies(virtrust-obj Deps::secure_c)
 
 # Object protobuf lib
 
@@ -77,7 +78,10 @@ target_include_directories(
   PRIVATE ${CMAKE_DEPS_INCLUDEDIR} ${CMAKE_CURRENT_BINARY_DIR}/src
           $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src>)
 
-target_link_libraries(virtrust-shared PRIVATE tsb-agent Deps::spdlog boundscheck)
+# spdlog is PUBLIC so its usage requirements (include dirs + SPDLOG_FMT_EXTERNAL
+# etc.) propagate to consumers that include spdlog headers through logger.h
+target_link_libraries(virtrust-shared PUBLIC Deps::spdlog)
+target_link_libraries(virtrust-shared PRIVATE tsb-agent boundscheck)
 
 target_link_libraries(
   virtrust-shared
