@@ -40,7 +40,6 @@ public:
         canceled_.store(true);
         if (worker_.joinable()) {
             if (std::this_thread::get_id() == worker_.get_id()) {
-                // 通常调用Cancel的现成!=worker_，除非callback中调用Cancel造成死锁
                 worker_.detach();
             } else {
                 worker_.join();

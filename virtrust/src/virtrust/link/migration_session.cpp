@@ -28,9 +28,11 @@ unsigned int GetFlagCleard(const unsigned int &flags, const unsigned int &clear)
 }
 } // namespace
 
-MigrationSession *SessionManager::CreateSession(MigrationSession::Role role, const std::string &uuid,
-                                                const std::string &domainName, const std::string &destUri,
-                                                const std::string &localUri, const unsigned int flags)
+std::shared_ptr<MigrationSession> SessionManager::CreateSession(MigrationSession::Role role, const std::string &uuid,
+                                                                const std::string &domainName,
+                                                                const std::string &destUri,
+                                                                const std::string &localUri,
+                                                                const unsigned int flags)
 {
     std::lock_guard<std::mutex> lock(mtx_);
 
@@ -40,20 +42,19 @@ MigrationSession *SessionManager::CreateSession(MigrationSession::Role role, con
         return nullptr;
     }
 
-    auto session = std::make_unique<MigrationSession>(role, uuid, domainName, destUri, localUri, flags);
-    MigrationSession *raw = session.get();
-    sessions_[uuid] = std::move(session);
-    return raw;
+    auto session = std::make_shared<MigrationSession>(role, uuid, domainName, destUri, localUri, flags);
+    sessions_[uuid] = session;
+    return session;
 }
 
-MigrationSession *SessionManager::GetSession(const std::string &uuid)
+std::shared_ptr<MigrationSession> SessionManager::GetSession(const std::string &uuid)
 {
     std::lock_guard<std::mutex> lock(mtx_);
     auto it = sessions_.find(uuid);
     if (it == sessions_.end()) {
         return nullptr;
     }
-    return it->second.get();
+    return it->second;
 }
 
 void SessionManager::RemoveSession(const std::string &uuid)
@@ -674,7 +675,12 @@ void MigrationSession::StartTimerFor(State s)
 {
     timerActive_.store(true);
     auto dur = TimeoutForState(s);
-    timer_.Start(dur, [this, s] { this->OnTimeout(s); });
+    std::weak_ptr<MigrationSession> weakSelf = weak_from_this();
+    timer_.Start(dur, [weakSelf, s] {
+        if (auto self = weakSelf.lock()) {
+            self->OnTimeout(s);
+        }
+    });
 }
 
 void MigrationSession::CancelTimer()

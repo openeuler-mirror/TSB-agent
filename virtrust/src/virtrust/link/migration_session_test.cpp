@@ -65,18 +65,20 @@ TEST_F(MigrationSessionTest, SessionManagerCreateAndGetSession)
     SessionManager &manager = SessionManager::GetInstance();
 
     // Create a session
-    MigrationSession *session =
+    auto session =
         manager.CreateSession(MigrationSession::Role::Initiator, sessionId_, domainName_, destUri_, localUri_, flags_);
 
     ASSERT_NE(session, nullptr);
     EXPECT_EQ(session->Id(), sessionId_);
 
     // Get the same session
-    MigrationSession *retrievedSession = manager.GetSession(sessionId_);
+    auto retrievedSession = manager.GetSession(sessionId_);
     EXPECT_EQ(retrievedSession, session);
 
-    // Clean up
+    // Removing the manager entry must not invalidate a session still held by a caller.
     manager.RemoveSession(sessionId_);
+    EXPECT_EQ(manager.GetSession(sessionId_), nullptr);
+    EXPECT_EQ(retrievedSession->Id(), sessionId_);
 }
 
 TEST_F(MigrationSessionTest, SessionManagerCreateDuplicateSession)
@@ -84,12 +86,12 @@ TEST_F(MigrationSessionTest, SessionManagerCreateDuplicateSession)
     SessionManager &manager = SessionManager::GetInstance();
 
     // Create first session
-    MigrationSession *firstSession =
+    auto firstSession =
         manager.CreateSession(MigrationSession::Role::Initiator, sessionId_, domainName_, destUri_, localUri_, flags_);
 
     // Create second session with same ID (should return existing one)
-    MigrationSession *secondSession = manager.CreateSession(MigrationSession::Role::Responder, sessionId_,
-                                                            "other-domain", "other-uri", "other-uri", 1);
+    auto secondSession = manager.CreateSession(MigrationSession::Role::Responder, sessionId_, "other-domain",
+                                               "other-uri", "other-uri", 1);
 
     EXPECT_EQ(firstSession, secondSession);
     EXPECT_EQ(secondSession->Id(), sessionId_);
@@ -103,7 +105,7 @@ TEST_F(MigrationSessionTest, SessionManagerGetNonExistentSession)
     SessionManager &manager = SessionManager::GetInstance();
 
     // Try to get non-existent session
-    MigrationSession *session = manager.GetSession("non-existent-session");
+    auto session = manager.GetSession("non-existent-session");
     EXPECT_EQ(session, nullptr);
 }
 
@@ -124,7 +126,7 @@ TEST_F(MigrationSessionTest, SessionManagerMultipleSessions)
 
     // Create multiple sessions
     for (const auto &id : sessionIds) {
-        MigrationSession *session =
+        auto session =
             manager.CreateSession(MigrationSession::Role::Initiator, id, domainName_, destUri_, localUri_, flags_);
         ASSERT_NE(session, nullptr);
         EXPECT_EQ(session->Id(), id);
@@ -132,7 +134,7 @@ TEST_F(MigrationSessionTest, SessionManagerMultipleSessions)
 
     // Verify all sessions exist
     for (const auto &id : sessionIds) {
-        MigrationSession *session = manager.GetSession(id);
+        auto session = manager.GetSession(id);
         EXPECT_NE(session, nullptr);
         EXPECT_EQ(session->Id(), id);
     }
@@ -144,7 +146,7 @@ TEST_F(MigrationSessionTest, SessionManagerMultipleSessions)
 
     // Verify all sessions are removed
     for (const auto &id : sessionIds) {
-        MigrationSession *session = manager.GetSession(id);
+        auto session = manager.GetSession(id);
         EXPECT_EQ(session, nullptr);
     }
 }
@@ -332,7 +334,7 @@ TEST_F(MigrationSessionTest, SessionManagerThreadSafety)
         sessionIds.push_back(id);
 
         threads.emplace_back([&manager, id, this]() {
-            MigrationSession *session =
+            auto session =
                 manager.CreateSession(MigrationSession::Role::Initiator, id, domainName_, destUri_, localUri_, flags_);
             EXPECT_NE(session, nullptr);
         });
@@ -345,7 +347,7 @@ TEST_F(MigrationSessionTest, SessionManagerThreadSafety)
 
     // Verify all sessions were created
     for (const auto &id : sessionIds) {
-        MigrationSession *session = manager.GetSession(id);
+        auto session = manager.GetSession(id);
         EXPECT_NE(session, nullptr);
     }
 

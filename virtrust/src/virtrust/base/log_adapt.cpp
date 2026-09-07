@@ -174,6 +174,10 @@ VirtrustRc LogAdapt::Initialize()
 
 VirtrustRc LogAdapt::Log(int level, const char *prefix, const char *message) const
 {
+    if (prefix == nullptr || message == nullptr) {
+        gLastErrorMessage = "Log prefix and message must not be nullptr";
+        return VirtrustRc::ERROR;
+    }
     if (level < static_cast<int>(LogLevel::TRACE) || level > static_cast<int>(LogLevel::CRITICAL)) {
         gLastErrorMessage = "Invalid log level, which should be 0-5";
         return VirtrustRc::ERROR;
