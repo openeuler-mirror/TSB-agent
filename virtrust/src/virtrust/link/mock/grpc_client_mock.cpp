@@ -20,7 +20,7 @@ int32_t UdsClientMock::DomainMigrate(const MigrationConfig &config)
 {
     // Create source migration session
     auto &mgr = SessionManager::GetInstance();
-    MigrationSession *session = mgr.CreateSession(
+    auto session = mgr.CreateSession(
         MigrationSession::Role::Initiator,
         config.uuid,
         config.domainName,

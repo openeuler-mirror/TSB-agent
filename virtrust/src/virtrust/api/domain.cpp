@@ -206,27 +206,35 @@ bool ConvertTsbStruct(const VirshMeasureInfo &src, struct MeasureInfo *&target)
     return true;
 }
 
-void FreeMeasureInfo(struct MeasureInfo *bios, struct MeasureInfo *shim, struct MeasureInfo *grub,
-                     struct MeasureInfo *grubCfg, struct MeasureInfo *kernel, struct MeasureInfo *initrd)
+struct MeasureInfoSet {
+    MeasureInfo *bios = nullptr;
+    MeasureInfo *shim = nullptr;
+    MeasureInfo *grub = nullptr;
+    MeasureInfo *grubCfg = nullptr;
+    MeasureInfo *kernel = nullptr;
+    MeasureInfo *initrd = nullptr;
+
+    void Free() noexcept
+    {
+        auto release = [](MeasureInfo *&ptr) {
+            if (ptr != nullptr) {
+                free(ptr);
+                ptr = nullptr;
+            }
+        };
+
+        release(bios);
+        release(shim);
+        release(grub);
+        release(grubCfg);
+        release(kernel);
+        release(initrd);
+    }
+};
+
+void FreeMeasureInfo(MeasureInfoSet &infos) noexcept
 {
-    if (bios != nullptr) {
-        free(bios);
-    }
-    if (shim != nullptr) {
-        free(shim);
-    }
-    if (grub != nullptr) {
-        free(grub);
-    }
-    if (grubCfg != nullptr) {
-        free(grubCfg);
-    }
-    if (kernel != nullptr) {
-        free(kernel);
-    }
-    if (initrd != nullptr) {
-        free(initrd);
-    }
+    infos.Free();
 }
 
 bool CheckGuestBeforeStart(std::string_view domainName, std::string &uuid, std::future<int> &asyncStartRoot,
@@ -241,29 +249,28 @@ bool CheckGuestBeforeStart(std::string_view domainName, std::string &uuid, std::
     }
 
     // 转换为tsb-agent需要的结构体
-    struct MeasureInfo *bios = nullptr;
-    struct MeasureInfo *shim = nullptr;
-    struct MeasureInfo *grub = nullptr;
-    struct MeasureInfo *grubCfg = nullptr;
-    struct MeasureInfo *kernel = nullptr;
-    struct MeasureInfo *initrd = nullptr;
+    MeasureInfoSet infos;
 
-    bool res = ConvertTsbStruct(measureSummary.bios, bios) && ConvertTsbStruct(measureSummary.shim, shim) &&
-               ConvertTsbStruct(measureSummary.kernel, kernel) && ConvertTsbStruct(measureSummary.initrd, initrd) &&
-               ConvertTsbStruct(measureSummary.grub, grub) && ConvertTsbStruct(measureSummary.grubCfg, grubCfg);
+    bool res = ConvertTsbStruct(measureSummary.bios, infos.bios) &&
+               ConvertTsbStruct(measureSummary.shim, infos.shim) &&
+               ConvertTsbStruct(measureSummary.kernel, infos.kernel) &&
+               ConvertTsbStruct(measureSummary.initrd, infos.initrd) &&
+               ConvertTsbStruct(measureSummary.grub, infos.grub) &&
+               ConvertTsbStruct(measureSummary.grubCfg, infos.grubCfg);
     if (!res) {
         VIRTRUST_LOG_ERROR("convert tsb struct failed:{}", domainName);
-        FreeMeasureInfo(bios, shim, grub, grubCfg, kernel, initrd);
+        FreeMeasureInfo(infos);
         return false;
     }
     // 检查度量值是否通过
     auto start = std::chrono::high_resolution_clock::now();
-    auto tsbRc = CheckMeasure(uuid.data(), bios, shim, grub, grubCfg, kernel, initrd);
+    auto tsbRc = CheckMeasure(uuid.data(), infos.bios, infos.shim, infos.grub,
+                              infos.grubCfg, infos.kernel, infos.initrd);
     auto end = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
     VIRTRUST_LOG_DEBUG("|CheckGuestBeforeStart||calc time-consuming, target: func_checkMeasure, duration:{} ms",
                        duration.count());
-    FreeMeasureInfo(bios, shim, grub, grubCfg, kernel, initrd);
+    FreeMeasureInfo(infos);
 
     if (tsbRc == IMPORT_BM_FAILURE) {
         VIRTRUST_LOG_ERROR("|CheckGuestBeforeStart|End|returnF|domainName:{}|CheckMeasure: import failed", domainName);
@@ -284,21 +291,20 @@ bool UpdateMeasure(std::string_view domainName, std::string &uuid)
     if (!CalcVirshMeasure(domainName, measureSummary)) {
         return false;
     }
-    struct MeasureInfo *bios = nullptr;
-    struct MeasureInfo *shim = nullptr;
-    struct MeasureInfo *grub = nullptr;
-    struct MeasureInfo *grubCfg = nullptr;
-    struct MeasureInfo *kernel = nullptr;
-    struct MeasureInfo *initrd = nullptr;
-    bool res = ConvertTsbStruct(measureSummary.bios, bios) && ConvertTsbStruct(measureSummary.shim, shim) &&
-               ConvertTsbStruct(measureSummary.kernel, kernel) && ConvertTsbStruct(measureSummary.initrd, initrd) &&
-               ConvertTsbStruct(measureSummary.grub, grub) && ConvertTsbStruct(measureSummary.grubCfg, grubCfg);
+    MeasureInfoSet infos;
+    bool res = ConvertTsbStruct(measureSummary.bios, infos.bios) &&
+               ConvertTsbStruct(measureSummary.shim, infos.shim) &&
+               ConvertTsbStruct(measureSummary.kernel, infos.kernel) &&
+               ConvertTsbStruct(measureSummary.initrd, infos.initrd) &&
+               ConvertTsbStruct(measureSummary.grub, infos.grub) &&
+               ConvertTsbStruct(measureSummary.grubCfg, infos.grubCfg);
     if (!res) {
-        FreeMeasureInfo(bios, shim, grub, grubCfg, kernel, initrd);
+        FreeMeasureInfo(infos);
         return false;
     }
-    auto tsbRc = UpdateMeasure(uuid.data(), bios, shim, grub, grubCfg, kernel, initrd);
-    FreeMeasureInfo(bios, shim, grub, grubCfg, kernel, initrd);
+    auto tsbRc = UpdateMeasure(uuid.data(), infos.bios, infos.shim, infos.grub,
+                               infos.grubCfg, infos.kernel, infos.initrd);
+    FreeMeasureInfo(infos);
     if (tsbRc != 0) {
         VIRTRUST_LOG_ERROR("update tsb measure failed:{}", domainName);
         return false;

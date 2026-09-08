@@ -5,6 +5,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -23,7 +24,7 @@ enum class MigrateSessionRc : uint32_t {
     ERROR = 1,
 };
 
-class MigrationSession {
+class MigrationSession : public std::enable_shared_from_this<MigrationSession> {
 public:
     enum class Role {
         Initiator, // 客户端状态
@@ -155,15 +156,15 @@ public:
 
     SessionManager &operator=(const SessionManager &) = delete;
 
-    // 创建并托管一个会话，返回裸指针，所有权仍在manager内
-    MigrationSession *CreateSession(MigrationSession::Role role, const std::string &uuid,
-                                    const std::string &domainName, const std::string &destUri,
-                                    const std::string &localUri, const unsigned int flags);
+    // 创建并托管一个会话，调用方通过共享所有权保证使用期间对象存活
+    std::shared_ptr<MigrationSession> CreateSession(MigrationSession::Role role, const std::string &uuid,
+                                                    const std::string &domainName, const std::string &destUri,
+                                                    const std::string &localUri, const unsigned int flags);
 
     // 查找会话（比如 gRPC handler 用这个）
-    MigrationSession *GetSession(const std::string &uuid);
+    std::shared_ptr<MigrationSession> GetSession(const std::string &uuid);
 
-    // 会话结束时调用，真正删除
+    // 会话结束时移除 manager 持有的引用；对象在最后一个使用者释放后销毁
     void RemoveSession(const std::string &uuid);
 
 private:
@@ -173,7 +174,7 @@ private:
 
     std::mutex mtx_;
 
-    std::unordered_map<std::string, std::unique_ptr<MigrationSession>> sessions_;
+    std::unordered_map<std::string, std::shared_ptr<MigrationSession>> sessions_;
 };
 
 struct EXchangePkAndReport {

@@ -216,6 +216,20 @@ TEST_F(LogAdaptTest, LogMethod)
     }
 }
 
+TEST_F(LogAdaptTest, LogRejectsNullPrefixOrMessage)
+{
+    LogAdapt logAdapt(STDOUT_TYPE, "", 0, 0);
+
+    EXPECT_EQ(logAdapt.Log(LOG_INFO, nullptr, "message"), VirtrustRc::ERROR);
+    EXPECT_EQ(LogAdapt::gLastErrorMessage, "Log prefix and message must not be nullptr");
+
+    EXPECT_EQ(logAdapt.Log(LOG_INFO, "PREFIX", nullptr), VirtrustRc::ERROR);
+    EXPECT_EQ(LogAdapt::gLastErrorMessage, "Log prefix and message must not be nullptr");
+
+    EXPECT_EQ(logAdapt.Log(LOG_INFO, nullptr, nullptr), VirtrustRc::ERROR);
+    EXPECT_EQ(LogAdapt::gLastErrorMessage, "Log prefix and message must not be nullptr");
+}
+
 // Test CreateInstance duplicate call (should return OK without creating new instance)
 TEST_F(LogAdaptTest, CreateInstanceDuplicate)
 {

@@ -65,7 +65,7 @@ TEST_F(MigrationServiceImplTest, PrepareMigrationNewSession)
     EXPECT_EQ(response.result(), 0u);
 
     // Session should be created
-    MigrationSession *session = SessionManager::GetInstance().GetSession(testUuid_);
+    auto session = SessionManager::GetInstance().GetSession(testUuid_);
     EXPECT_NE(session, nullptr);
     EXPECT_EQ(session->Id(), testUuid_);
 }
@@ -375,7 +375,7 @@ TEST_F(MigrationServiceImplTest, MultipleSessions)
         EXPECT_EQ(response.result(), 0u);
 
         // Verify session exists
-        MigrationSession *session = SessionManager::GetInstance().GetSession(uuid);
+        auto session = SessionManager::GetInstance().GetSession(uuid);
         EXPECT_NE(session, nullptr);
         EXPECT_EQ(session->Id(), uuid);
     }
