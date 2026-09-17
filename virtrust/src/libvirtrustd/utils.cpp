@@ -143,9 +143,7 @@ LinkConfig ParseJsonDocToConfig(const rapidjson::Document &jsonDoc)
 #define FIND_KEY(NAME, T, DEFAULT_VALUE)                          \
     do {                                                          \
         auto tmp = FindJsonKey<T>(jsonDoc, #NAME, DEFAULT_VALUE); \
-        if (tmp) {                                                \
-            configBuidler.NAME(tmp.value());                      \
-        }                                                         \
+        configBuidler.NAME(tmp.value_or(DEFAULT_VALUE));          \
     } while (0)
 
     FIND_KEY(caPath, std::string, std::string(LIBVIRTRUSTD_SERVER_ADDR));
