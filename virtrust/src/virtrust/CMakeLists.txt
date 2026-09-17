@@ -81,12 +81,11 @@ target_include_directories(
 # spdlog is PUBLIC so its usage requirements (include dirs + SPDLOG_FMT_EXTERNAL
 # etc.) propagate to consumers that include spdlog headers through logger.h
 target_link_libraries(virtrust-shared PUBLIC Deps::spdlog)
-target_link_libraries(virtrust-shared PRIVATE tsb-agent boundscheck)
+target_link_libraries(virtrust-shared PRIVATE tsb-agent Deps::secure_c)
 
 target_link_libraries(
   virtrust-shared
   PRIVATE grpc++
-          grpc++
           grpc
           grpc++_reflection
           gpr

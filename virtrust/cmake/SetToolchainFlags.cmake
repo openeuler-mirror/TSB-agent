@@ -21,13 +21,13 @@ endfunction()
 
 # C Compiler Flags
 function(add_c_compiler_flags flag)
-  string(FIND "${CMAKE_CXX_FLAGS}" "${flag}" flag_already_set)
+  string(FIND "${CMAKE_C_FLAGS}" "${flag}" flag_already_set)
   if(flag_already_set EQUAL -1)
     message(STATUS "Adding C compiler flag: ${flag} ...")
     check_compiler_flag(C "${flag}" flag_supported)
     if(flag_supported)
-      set(CMAKE_CXX_FLAGS
-          "${CMAKE_CXX_FLAGS} ${flag}"
+      set(CMAKE_C_FLAGS
+          "${CMAKE_C_FLAGS} ${flag}"
           PARENT_SCOPE)
     endif()
     unset(flag_supported CACHE)
@@ -82,7 +82,7 @@ macro(set_toolchain_flags)
   add_compiler_flags(-Wcast-align)
   add_compiler_flags(-Wcast-equal)
   add_compiler_flags(-Wwrite-strings)
-  add_compiler_flags(-Wdata-time)
+  add_compiler_flags(-Wdate-time)
   add_compiler_flags(-Wstrict-prototypes)
   add_compiler_flags(-Wdelete-non-virtual-dtor)
   add_compiler_flags(-Wtrampolines)
@@ -95,10 +95,10 @@ macro(set_toolchain_flags)
 
   #
   if(CMAKE_BUILD_TYPE STREQUAL "Release")
-    add_compiler_flags(-fstrack-protector-strong)
+    add_compiler_flags(-fstack-protector-strong)
     add_compiler_flags(-fPIC)
     add_compiler_flags(-fPIE)
-    add_compiler_flags(-D_FORTIRY_SOURCE=2)
+    add_compiler_flags(-D_FORTIFY_SOURCE=2)
     add_compiler_flags(-O2)
     add_compiler_flags(-ftrapv)
 
