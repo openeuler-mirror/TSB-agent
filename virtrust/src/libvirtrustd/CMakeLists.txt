@@ -20,3 +20,5 @@ target_include_directories(
 
 target_link_libraries(libvirtrustd PRIVATE libvirtrustd-obj virtrust-shared
                                               Deps::rapidjson Deps::spdlog)
+
+add_libvirtrustd_test_if(utils_test)

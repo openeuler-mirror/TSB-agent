@@ -6,6 +6,7 @@
 
 # Build file
 virtrust/build/*
+virtrust/output/*
 
 .vscode
 
