@@ -1,7 +1,7 @@
 #!/bin/bash
 
 #
-# Copyright (c) Huawei Technologies Co., Ltd. 2021-2021. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
 #
 
 ###
@@ -23,7 +23,6 @@
 
 build_target='cicd_default'
 build_type='Release'
-build_asan='Off'
 enable_test='On'
 
 # 获取项目根目录(目前为构建脚本所在目录)
@@ -63,7 +62,7 @@ function parse_args() {
             fi
             ;;
         *)
-            [ "$1" != ""] && build_target="$1"
+            [ "$1" != "" ] && build_target="$1"
             shift
             ;;
         esac
@@ -95,6 +94,7 @@ function build_cmake() {
     local ret=$?
     if [[ $ret -ne 0 ]]; then
         log_info "***** build cmake failed *****"
+        #  echo_failure 函数在脚本中没有定义，构建失败时会先报一句 command not found 再 exit 1
         echo_failure
         exit 1
     fi
