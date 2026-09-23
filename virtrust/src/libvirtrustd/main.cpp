@@ -10,6 +10,7 @@
 #include <thread>
 
 #include "libvirtrustd/defines.h"
+#include "libvirtrustd/daemon_instance.h"
 #include "libvirtrustd/utils.h"
 
 #include "virtrust/base/logger.h"
@@ -66,9 +67,7 @@ int ProcessArgs(int argc, char **argv)
     };
 
     std::string configPath;
-    // The leading + means no re-ordering, see man page of getopt_long
-    // The ":" after "c" means it has long arguments from cli, and is parsed to
-    // optarg
+    // 开头的 + 禁止重排参数；c 后的冒号表示该选项需要参数，由 optarg 接收。
     while ((arg = getopt_long(argc, argv, "+c:dhv", opt.data(), &longindex)) != -1) {
         switch (arg) {
             case 'c':
@@ -79,14 +78,14 @@ int ProcessArgs(int argc, char **argv)
                 break;
             case 'v':
                 PrintVersion(argv[0]);
-                return 0; // return with success
+                return 0; // 成功返回。
             case 'h':
                 PrintUsage(argv[0]);
-                return 0; // return with success
+                return 0; // 成功返回。
             case '?':
             default:
                 PrintUsage(argv[0]);
-                return 1; // return with failure
+                return 1; // 失败返回。
         }
     }
 
@@ -94,38 +93,38 @@ int ProcessArgs(int argc, char **argv)
         fmt::print("\n"
                    "  ERROR: Missing requried config files\n");
         PrintUsage(argv[0]);
-        return 1; // return with success
+        return 1; // 失败返回。
     }
 
     auto ret = MakeLinkConfigFromJsonFile(configPath);
     if (ret.has_value()) {
         ConfigMgr::Instance().SetLinkConfig(ret.value());
-        GrpcServer sever(ret.value());
-        fmt::print("start link config. Exiting...{}, {}\n", ret.value().udsPath, ret.value().caPath);
-        LinkRc linkRc = sever.Start();
-        if (linkRc != LinkRc::OK) {
-            fmt::print("Failed to start link config. Exiting...\n");
+        // 帮助/版本及配置解析不获取资格；任何 Socket 清理或监听之前必须先持实例锁。
+        // 此对象先停止并销毁服务，再释放锁，覆盖正常退出和启动失败路径。
+        DaemonRuntime runtime(ret.value(), VIRTRUSTD_RUNTIME_DIRECTORY, 0);
+        if (runtime.Start() != LockOutcome::Acquired) {
+            fmt::print("Daemon startup failed: {}\n", runtime.LastError());
             return 1;
         }
 
         while (g_stopFlag == 0) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
         }
-        sever.Stop();
+        // 离开作用域由 runtime 按服务→实例锁顺序清理，不删除实例锁文件。
     } else {
         fmt::print("\n"
                    "  ERROR: Failed to parse config files\n");
-        // make link config failed
+        // 通信配置创建失败。
         return 1;
     }
     return 0;
 }
-} // namespace
-} // namespace virtrust
+} // 匿名命名空间
+} // 命名空间 virtrust
 
 int main(int argc, char **argv)
 {
-    // register signal handler
+    // 注册信号处理函数。
     signal(SIGINT, virtrust::SignalHandler);
     signal(SIGTERM, virtrust::SignalHandler);
     signal(SIGPIPE, virtrust::SignalHandler);

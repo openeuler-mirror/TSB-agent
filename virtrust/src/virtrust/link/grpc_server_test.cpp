@@ -1,312 +1,183 @@
 /*
- * Copyright (C) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
+ * Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
  */
 
-#include <unistd.h>
-
-#include <chrono>
+#include "virtrust/link/grpc_server.h"
+#include <gtest/gtest.h>
+#include <cstdlib>
+#include <cerrno>
 #include <filesystem>
 #include <fstream>
-#include <string>
-#include <thread>
-
-#include "gtest/gtest.h"
-
-#include "virtrust/link/defines.h"
-#include "virtrust/link/grpc_server.h"
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/un.h>
+#include <unistd.h>
 
 namespace virtrust {
-
-class GrpcServerTest : public ::testing::Test {
+// 独立目录与临时端口，不接触真实服务；子进程隔离旧实现 terminate 的故障。
+class GrpcServerTest : public testing::Test {
 protected:
     void SetUp() override
     {
-        // Initialize test configuration
-        linkConfig_.caPath = "/test/ca.pem";
-        linkConfig_.certPath = "/test/cert.pem";
-        linkConfig_.skPath = "/test/sk.pem";
-        linkConfig_.ip = "127.0.0.1";
-        linkConfig_.ipMask = "127.0.0.0/24";
-        linkConfig_.port = 50052; // Use different port to avoid conflicts
-        linkConfig_.udsPath = "/tmp/test_grpc_server.sock";
+        char pattern[] = "/tmp/virtrust-server-ut.XXXXXX";
+        const char *created = mkdtemp(pattern);
+        ASSERT_NE(created, nullptr);
+        directory = created;
+        config.ip = "127.0.0.1";
+        config.port = 0;
+        config.udsPath = directory + "/rpc.sock";
     }
-
-    void TearDown() override
-    {
-        // Clean up any leftover UDS file
-        std::filesystem::remove(linkConfig_.udsPath.c_str());
-    }
-
-    LinkConfig linkConfig_;
+    void TearDown() override { if (!directory.empty()) { std::filesystem::remove_all(directory); } }
+    std::string directory;
+    LinkConfig config {};
 };
 
-TEST_F(GrpcServerTest, Constructor)
+TEST_F(GrpcServerTest, FailedStartCanBeStoppedAndDestroyedRepeatedly)
 {
-    // Test that GrpcServer can be constructed with valid config
-    GrpcServer server(linkConfig_);
-
-    // The constructor should not throw, and the server should be valid
-    SUCCEED();
+    config.udsPath = directory + "/missing/rpc.sock";
+    EXPECT_EXIT({
+        bool ok = true;
+        {
+            GrpcServer server(config);
+            for (int i = 0; i < 3; ++i) {
+                ok = (server.Start() == LinkRc::ERROR) && ok;
+                server.Stop();
+                server.Stop();
+            }
+        }
+        _exit(ok ? 0 : 1);
+    }, testing::ExitedWithCode(0), "");
 }
 
-TEST_F(GrpcServerTest, ConstructorWithEmptyConfig)
+TEST_F(GrpcServerTest, ExistingRegularFileIsNeverDeleted)
 {
-    // Test with empty config
-    LinkConfig emptyConfig;
-    GrpcServer server(emptyConfig);
-
-    // Should still construct successfully
-    SUCCEED();
+    std::ofstream(config.udsPath) << "keep";
+    EXPECT_EXIT({
+        bool ok;
+        {
+            GrpcServer server(config);
+            ok = server.Start() == LinkRc::ERROR;
+            server.Stop();
+        }
+        std::ifstream input(config.udsPath);
+        std::string text;
+        input >> text;
+        _exit(ok && text == "keep" ? 0 : 1);
+    }, testing::ExitedWithCode(0), "");
 }
 
-TEST_F(GrpcServerTest, StartAndStop)
+TEST_F(GrpcServerTest, SymlinkIsNeverDeleted)
 {
-    GrpcServer server(linkConfig_);
+    ASSERT_EQ(symlink("missing-target", config.udsPath.c_str()), 0);
+    EXPECT_EXIT({
+        bool ok;
+        {
+            GrpcServer server(config);
+            ok = server.Start() == LinkRc::ERROR;
+            server.Stop();
+        }
+        _exit(ok && std::filesystem::is_symlink(config.udsPath) ? 0 : 1);
+    }, testing::ExitedWithCode(0), "");
+}
 
-    // Start the server
-    LinkRc startResult = server.Start();
+TEST_F(GrpcServerTest, DestructorStopsSuccessfulServerAndAllowsRestart)
+{
+    EXPECT_EXIT({
+        bool ok = true;
+        for (int i = 0; i < 3; ++i) {
+            GrpcServer server(config);
+            ok = (server.Start() == LinkRc::OK) && ok;
+            ok = (server.Start() == LinkRc::ERROR) && ok;
+        }
+        _exit(ok ? 0 : 1);
+    }, testing::ExitedWithCode(0), "");
+}
 
-    // Give the server a moment to start
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-
-    // Stop the server
+TEST_F(GrpcServerTest, ActiveSocketIsNotRemovedByAnotherServer)
+{
+    const int socketFd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    ASSERT_GE(socketFd, 0);
+    sockaddr_un address {};
+    address.sun_family = AF_UNIX;
+    config.udsPath.copy(address.sun_path, sizeof(address.sun_path) - 1);
+    const int bound = bind(socketFd, reinterpret_cast<sockaddr *>(&address), sizeof(address));
+    const int listening = bound == 0 ? listen(socketFd, 8) : -1;
+    if (listening != 0) { close(socketFd); FAIL() << "cannot create isolated socket"; }
+    struct stat before {};
+    ASSERT_EQ(lstat(config.udsPath.c_str(), &before), 0);
+    EXPECT_EXIT({
+        bool ok;
+        {
+            GrpcServer server(config);
+            ok = server.Start() == LinkRc::ERROR;
+            server.Stop();
+        }
+        struct stat after {};
+        _exit(ok && lstat(config.udsPath.c_str(), &after) == 0 && before.st_ino == after.st_ino ? 0 : 1);
+    }, testing::ExitedWithCode(0), "");
+    close(socketFd);
+}
+// 同一对象反复 Start/Stop，验证线程和服务指针均已回收，诊断也可再次使用。
+TEST_F(GrpcServerTest, SameObjectCanRestartAndReportFailures)
+{
+    GrpcServer server(config);
     server.Stop();
-
-    // Both start and stop should succeed
-    EXPECT_EQ(startResult, LinkRc::OK);
-}
-
-TEST_F(GrpcServerTest, StartTwice)
-{
-    GrpcServer server(linkConfig_);
-
-    // Start the server first time
-    LinkRc firstStart = server.Start();
-
-    // Give the server a moment to start
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-
-    // Try to start again - should fail
-    LinkRc secondStart = server.Start();
-
-    // Stop the server
-    server.Stop();
-
-    // First start should succeed, second should fail
-    EXPECT_EQ(firstStart, LinkRc::OK);
-    EXPECT_EQ(secondStart, LinkRc::ERROR);
-}
-
-TEST_F(GrpcServerTest, StopWithoutStart)
-{
-    GrpcServer server(linkConfig_);
-
-    // Stop the server without starting it - should not crash
-    server.Stop();
-
-    // Should complete without issues
-    SUCCEED();
-}
-
-TEST_F(GrpcServerTest, StartStopMultipleTimes)
-{
-    GrpcServer server(linkConfig_);
-
-    for (int i = 0; i < 3; i++) {
-        // Start the server
-        LinkRc startResult = server.Start();
-
-        // Give the server a moment to start
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-        // Stop the server
+    for (int i = 0; i < 3; ++i) {
+        ASSERT_EQ(server.Start(), LinkRc::OK) << server.LastError();
+        EXPECT_TRUE(server.LastError().empty());
+        EXPECT_EQ(server.Start(), LinkRc::ERROR);
+        EXPECT_FALSE(server.LastError().empty());
         server.Stop();
-
-        // Each start should succeed
-        EXPECT_EQ(startResult, LinkRc::OK);
-
-        // Brief pause between iterations
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    }
-}
-
-TEST_F(GrpcServerTest, StartWithInvalidPort)
-{
-    LinkConfig invalidConfig = linkConfig_;
-    invalidConfig.port = 0; // Invalid port
-
-    GrpcServer server(invalidConfig);
-
-    // Starting with invalid port should handle gracefully
-    LinkRc startResult = server.Start();
-    (void)startResult; // Suppress unused variable warning
-
-    // Give it a moment to attempt starting
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-
-    server.Stop();
-
-    // Start should handle the invalid port gracefully
-    // The exact result depends on gRPC implementation
-    // but it should not crash
-    SUCCEED();
-}
-
-TEST_F(GrpcServerTest, StartWithPrivilegedPort)
-{
-    LinkConfig privilegedConfig = linkConfig_;
-    privilegedConfig.port = 80; // Privileged port (might fail)
-
-    GrpcServer server(privilegedConfig);
-
-    // Starting with privileged port might fail due to permissions
-    LinkRc startResult = server.Start();
-    (void)startResult; // Suppress unused variable warning
-
-    // Give it a moment to attempt starting
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-
-    server.Stop();
-
-    // Should handle privileged port gracefully (might succeed or fail depending on permissions)
-    SUCCEED();
-}
-
-TEST_F(GrpcServerTest, StartWithInvalidUdsPath)
-{
-    LinkConfig invalidConfig = linkConfig_;
-    invalidConfig.udsPath = ""; // Empty UDS path
-
-    GrpcServer server(invalidConfig);
-
-    // Starting with invalid UDS path should handle gracefully
-    LinkRc startResult = server.Start();
-    (void)startResult; // Suppress unused variable warning
-
-    // Give it a moment to attempt starting
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-
-    server.Stop();
-
-    // Should handle the invalid UDS path gracefully
-    // The exact result depends on gRPC implementation
-    SUCCEED();
-}
-
-TEST_F(GrpcServerTest, StartWithLongUdsPath)
-{
-    LinkConfig longPathConfig = linkConfig_;
-    longPathConfig.udsPath =
-        "/tmp/very_long_uds_path_name_that_exceeds_normal_filesystem_limits_and_should_test_error_handling.sock";
-
-    GrpcServer server(longPathConfig);
-
-    // Starting with very long UDS path should handle gracefully
-    LinkRc startResult = server.Start();
-    (void)startResult; // Suppress unused variable warning
-
-    // Give it a moment to attempt starting
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-
-    server.Stop();
-
-    // Should handle the long UDS path gracefully
-    SUCCEED();
-}
-
-TEST_F(GrpcServerTest, ServerLifecycleWithRapidStartStop)
-{
-    GrpcServer server(linkConfig_);
-
-    // Test rapid start/stop cycles
-    for (int i = 0; i < 5; i++) {
-        LinkRc startResult = server.Start();
-        (void)startResult; // Suppress unused variable warning
-
-        // Very short start time
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-
         server.Stop();
-
-        // Brief pause
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
-
-    // Should handle rapid cycles without issues
-    SUCCEED();
 }
 
-TEST_F(GrpcServerTest, ServerHandlesExistingUdsFile)
+TEST_F(GrpcServerTest, StaleSocketCanBeReplaced)
 {
-    // Create a file at the UDS path first
-    std::ofstream existingFile(linkConfig_.udsPath);
-    existingFile << "existing content";
-    existingFile.close();
-
-    GrpcServer server(linkConfig_);
-
-    // Server should handle existing file at UDS path gracefully
-    LinkRc startResult = server.Start();
-    (void)startResult; // Suppress unused variable warning
-
-    // Give it a moment to start
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-
+    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    ASSERT_GE(fd, 0);
+    sockaddr_un address {};
+    address.sun_family = AF_UNIX;
+    config.udsPath.copy(address.sun_path, sizeof(address.sun_path) - 1);
+    int result = bind(fd, reinterpret_cast<sockaddr *>(&address), sizeof(address));
+    close(fd);
+    ASSERT_EQ(result, 0);
+    GrpcServer server(config);
+    EXPECT_EQ(server.Start(), LinkRc::OK) << server.LastError();
     server.Stop();
-
-    // Should handle existing file gracefully
-    SUCCEED();
+    EXPECT_FALSE(std::filesystem::exists(config.udsPath));
 }
 
-TEST_F(GrpcServerTest, ServerWithDifferentPorts)
+TEST_F(GrpcServerTest, InvalidTlsReturnsDiagnosticWithoutLeavingThread)
 {
-    std::vector<uint16_t> testPorts = {50053, 50054, 50055, 50056};
-
-    for (uint16_t port : testPorts) {
-        LinkConfig testConfig = linkConfig_;
-        testConfig.port = port;
-        testConfig.udsPath = "/tmp/test_grpc_server_" + std::to_string(port) + ".sock";
-
-        GrpcServer server(testConfig);
-
-        LinkRc startResult = server.Start();
-
-        // Give it a moment to start
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-        server.Stop();
-
-        // Clean up UDS file
-        std::filesystem::remove(testConfig.udsPath.c_str());
-
-        // Each port should be handled gracefully
-        EXPECT_EQ(startResult, LinkRc::OK);
-    }
-}
-
-TEST_F(GrpcServerTest, ServerConcurrentOperations)
-{
-    GrpcServer server(linkConfig_);
-
-    // Start server in background
-    std::thread startThread([&server]() {
-        LinkRc result = server.Start();
-        EXPECT_EQ(result, LinkRc::OK);
-    });
-
-    // Give server time to start
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-    // Stop server
+    config.caPath = directory + "/absent-ca";
+    config.certPath = directory + "/absent-cert";
+    config.skPath = directory + "/absent-key";
+    GrpcServer server(config);
+    EXPECT_EQ(server.Start(), LinkRc::ERROR);
+    EXPECT_FALSE(server.LastError().empty());
     server.Stop();
-
-    // Wait for start thread to complete
-    if (startThread.joinable()) {
-        startThread.join();
-    }
-
-    // Should handle concurrent operations without issues
-    SUCCEED();
+}
+// 诊断必须指向实际路径和检查阶段，而非只返回无法定位的泛化错误。
+TEST_F(GrpcServerTest, RegularFileDiagnosticIncludesPathAndStage)
+{
+    std::ofstream(config.udsPath) << "keep";
+    GrpcServer server(config);
+    ASSERT_EQ(server.Start(), LinkRc::ERROR);
+    EXPECT_NE(server.LastError().find(config.udsPath), std::string::npos);
+    EXPECT_NE(server.LastError().find("type check"), std::string::npos);
+    EXPECT_TRUE(std::filesystem::is_regular_file(config.udsPath));
 }
 
-} // namespace virtrust
+TEST_F(GrpcServerTest, StatFailureDiagnosticIncludesErrno)
+{
+    const std::string file = directory + "/not-directory";
+    std::ofstream(file) << "keep";
+    config.udsPath = file + "/rpc.sock";
+    GrpcServer server(config);
+    ASSERT_EQ(server.Start(), LinkRc::ERROR);
+    EXPECT_NE(server.LastError().find(config.udsPath), std::string::npos);
+    EXPECT_NE(server.LastError().find("Initial UDS lstat"), std::string::npos);
+    EXPECT_NE(server.LastError().find("errno=" + std::to_string(ENOTDIR)), std::string::npos);
+}
+} // 命名空间 virtrust

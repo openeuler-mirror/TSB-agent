@@ -912,6 +912,7 @@ VirtrustRc DomainMigrate(const std::unique_ptr<ConnCtx> &conn, const std::string
     if (!fileLock.IsLocked()) {
         return VirtrustRc::ERROR;
     }
+    // todo：后续检查flags的赋值逻辑，当前实现flags为固定值，并且无法看到赋值逻辑
     flags |= VIR_MIGRATE_OFFLINE | VIR_MIGRATE_PERSIST_DEST; // 默认离线迁移 离线迁移必须指定VIR_MIGRATE_PERSIST_DEST
     if (flags != (VIR_MIGRATE_OFFLINE | VIR_MIGRATE_PERSIST_DEST | MIGRATE_UNDEFINE_SOURCE)) {
         VIRTRUST_LOG_ERROR("|DomainMigrate|END|returnF|invalid flags, only support {}",
@@ -919,11 +920,12 @@ VirtrustRc DomainMigrate(const std::unique_ptr<ConnCtx> &conn, const std::string
         return VirtrustRc::ERROR;
     }
     if (destUri.empty() || destUri.find("qemu+tls://") != 0) {
-        VIRTRUST_LOG_ERROR("|DomainMigrate|END|returnF|destUrt is only support starts with qemu+tls://");
+        VIRTRUST_LOG_ERROR("|DomainMigrate|END|returnF|destUri is only support starts with qemu+tls://");
         return VirtrustRc::ERROR;
     }
     // 校验虚拟机是否tsb和virsh都存在 并获取uuid
     std::unordered_map<std::string, DomainInfo> domainInfos;
+    // todo：第二个参数为固定值，后续检查其合理性
     auto ret = DomainList(conn, LIST_DOMAINS_ACTIVE | LIST_DOMAINS_INACTIVE, domainInfos, false);
     if (ret != VirtrustRc::OK) {
         VIRTRUST_LOG_ERROR("|DomainMigrate|END|returnF|failed to get domainInfos");

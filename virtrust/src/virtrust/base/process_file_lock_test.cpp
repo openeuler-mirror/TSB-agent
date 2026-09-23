@@ -1,3 +1,7 @@
+/*
+ * Copyright (c) Huawei Technologies Co., Ltd. 2026-2026. All rights reserved.
+ */
+
 #include "virtrust/base/process_file_lock.h"
 
 #include <gtest/gtest.h>

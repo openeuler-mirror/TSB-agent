@@ -7,7 +7,7 @@ set(VIRTRUST_SOURCE_FILES
     ${CMAKE_CURRENT_LIST_DIR}/migration_service_impl.cpp
     ${CMAKE_CURRENT_LIST_DIR}/migration_session.cpp)
 
-# Add Mock source files in Fuzz mode
+# 在模糊测试模式下添加模拟实现源文件。
 if(ENABLE_MOCK_4_FUZZ)
     list(APPEND VIRTRUST_SOURCE_FILES
             ${CMAKE_CURRENT_SOURCE_DIR}/mock/grpc_client_mock.cpp
@@ -21,7 +21,7 @@ endif()
 set(VIRTRUST_PROTO_SOURCE_FILES ${VIRTRUST_PROTO_SOURCE_FILES}
                                 ${CMAKE_CURRENT_LIST_DIR}/proto/migrate.proto)
 
-# Add tests for link directory
+# 添加通信目录的测试。
 add_virtrust_test_if(proto_tools_test)
 if(BUILD_TEST)
   target_link_libraries(proto_tools_test PRIVATE virtrust_proto Deps::secure_c)
@@ -30,7 +30,10 @@ add_virtrust_test_if(grpc_client_test)
 if(BUILD_TEST)
   target_link_libraries(grpc_client_test PRIVATE virtrust_proto Deps::secure_c)
 endif()
-# add_virtrust_test_if(grpc_server_test ${BUILD_TEST})
+add_virtrust_test_if(grpc_server_test)
+if(BUILD_TEST)
+  set_tests_properties(grpc_server_test PROPERTIES TIMEOUT 30)
+endif()
 # add_virtrust_test_if(migration_session_test ${BUILD_TEST}) if(BUILD_TEST)
 # target_link_libraries(migration_session_test PRIVATE virtrust_proto) endif()
 # add_virtrust_test_if(migration_service_impl_test ${BUILD_TEST}) if(BUILD_TEST)
