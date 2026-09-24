@@ -2,15 +2,15 @@
  * Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
  */
 
+#include <fmt/format.h>
 #include <getopt.h>
 #include <unistd.h>
-#include <fmt/format.h>
 
 #include <csignal>
 #include <thread>
 
-#include "libvirtrustd/defines.h"
 #include "libvirtrustd/daemon_instance.h"
+#include "libvirtrustd/defines.h"
 #include "libvirtrustd/utils.h"
 
 #include "virtrust/base/logger.h"
@@ -119,8 +119,8 @@ int ProcessArgs(int argc, char **argv)
     }
     return 0;
 }
-} // 匿名命名空间
-} // 命名空间 virtrust
+} // namespace
+} // namespace virtrust
 
 int main(int argc, char **argv)
 {

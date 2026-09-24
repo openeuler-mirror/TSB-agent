@@ -38,9 +38,15 @@ public:
     // fork 后若还有继承副本，内核锁须等最后一个副本关闭才释放。
     void Release() noexcept;
     // 查询本对象是否持有描述符，不重新查询系统锁状态。
-    bool OwnsLock() const noexcept { return fd_ >= 0; }
+    bool OwnsLock() const noexcept
+    {
+        return fd_ >= 0;
+    }
     // 最近一次 Acquire 的错误码；应结合该次返回值判断，不代表释放结果。
-    int LastErrno() const noexcept { return error_; }
+    int LastErrno() const noexcept
+    {
+        return error_;
+    }
 
 private:
     // 仅在校验和加锁均成功后接管描述符；-1 表示空对象或已释放。
@@ -48,4 +54,4 @@ private:
     // 保存系统 errno 或接口校验错误，避免清理描述符时丢失故障原因。
     int error_ = 0;
 };
-} // 命名空间 virtrust
+} // namespace virtrust

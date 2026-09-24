@@ -5,12 +5,12 @@
 #pragma once
 
 #include <grpcpp/grpcpp.h>
-
-#include <memory>
-#include <thread>
-#include <future>
-#include <mutex>
 #include <sys/types.h>
+
+#include <future>
+#include <memory>
+#include <mutex>
+#include <thread>
 
 #include "virtrust/link/defines.h"
 
@@ -46,4 +46,4 @@ private:
     std::unique_ptr<grpc::Server> server_;
     std::unique_ptr<std::thread> server_thread_;
 };
-} // 命名空间 virtrust
+} // namespace virtrust

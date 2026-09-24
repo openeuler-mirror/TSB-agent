@@ -7,20 +7,20 @@ target_sources(libvirtrustd-obj PRIVATE ${CMAKE_CURRENT_LIST_DIR}/daemon_instanc
 
 target_include_directories(
   libvirtrustd-obj PRIVATE ${CMAKE_DEPS_INCLUDEDIR}
-                          $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src>)
+                         $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src>)
 
 target_link_libraries(libvirtrustd-obj PRIVATE virtrust-shared Deps::rapidjson
-                                                Deps::spdlog)
+                                            Deps::spdlog)
 
 # 守护进程可执行程序。
 add_executable(libvirtrustd ${CMAKE_CURRENT_LIST_DIR}/main.cpp)
 
 target_include_directories(
   libvirtrustd PRIVATE ${CMAKE_DEPS_INCLUDEDIR}
-                       $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src>)
+                     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src>)
 
 target_link_libraries(libvirtrustd PRIVATE libvirtrustd-obj virtrust-shared
-                                              Deps::rapidjson Deps::spdlog)
+                                         Deps::rapidjson Deps::spdlog)
 
 add_libvirtrustd_test_if(utils_test)
 add_libvirtrustd_test_if(daemon_instance_test)

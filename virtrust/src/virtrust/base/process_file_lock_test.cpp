@@ -2,31 +2,44 @@
  * Copyright (c) Huawei Technologies Co., Ltd. 2026-2026. All rights reserved.
  */
 
-#include "virtrust/base/process_file_lock.h"
-
-#include <gtest/gtest.h>
-#include <cerrno>
-#include <cstdlib>
-#include <filesystem>
 #include <fcntl.h>
+#include <gtest/gtest.h>
+#include <poll.h>
+#include <signal.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
-#include <utility>
+
+#include <cerrno>
 #include <chrono>
+#include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <thread>
-#include <signal.h>
-#include <poll.h>
+#include <utility>
+
+#include "virtrust/base/process_file_lock.h"
 
 namespace virtrust {
 namespace {
 // 失败断言提前返回时仍关闭管道，避免测试自身泄漏描述符。
 struct TestPipe {
-    int fd[2] {-1, -1};
-    TestPipe() { if (pipe(fd) != 0) { fd[0] = fd[1] = -1; } }
-    ~TestPipe() { for (int value : fd) { if (value >= 0) { close(value); } } }
+    int fd[2]{-1, -1};
+    TestPipe()
+    {
+        if (pipe(fd) != 0) {
+            fd[0] = fd[1] = -1;
+        }
+    }
+    ~TestPipe()
+    {
+        for (int value : fd) {
+            if (value >= 0) {
+                close(value);
+            }
+        }
+    }
     TestPipe(const TestPipe &) = delete;
     TestPipe &operator=(const TestPipe &) = delete;
 };
@@ -34,13 +47,15 @@ struct TestPipe {
 // 仅管理本用例创建的子进程：提前失败时终止并回收，正常完成后不重复操作 PID。
 class TestChild {
 public:
-    explicit TestChild(pid_t pid) : pid_(pid) {}
+    explicit TestChild(pid_t pid) : pid_(pid)
+    {}
     ~TestChild()
     {
         if (pid_ > 0) {
             kill(pid_, SIGKILL);
             int status;
-            while (waitpid(pid_, &status, 0) < 0 && errno == EINTR) {}
+            while (waitpid(pid_, &status, 0) < 0 && errno == EINTR) {
+            }
         }
     }
     TestChild(const TestChild &) = delete;
@@ -55,11 +70,14 @@ public:
                 pid_ = -1;
                 return WIFEXITED(status) && WEXITSTATUS(status) == 0;
             }
-            if (result < 0 && errno != EINTR) { return false; }
+            if (result < 0 && errno != EINTR) {
+                return false;
+            }
             std::this_thread::yield();
         }
         return false;
     }
+
 private:
     pid_t pid_;
 };
@@ -67,9 +85,11 @@ private:
 // 有限等待实际管道事件；超时是失败，不用固定 sleep 推断业务执行到了哪里。
 bool Receive(int fd, char expected)
 {
-    pollfd event {fd, POLLIN, 0};
+    pollfd event{fd, POLLIN, 0};
     int result;
-    do { result = poll(&event, 1, 3000); } while (result < 0 && errno == EINTR);
+    do {
+        result = poll(&event, 1, 3000);
+    } while (result < 0 && errno == EINTR);
     char value = 0;
     return result > 0 && read(fd, &value, 1) == 1 && value == expected;
 }
@@ -86,14 +106,16 @@ bool WaitForBlockedFlock(pid_t child)
             std::string id, arrow, kind, advisory, mode;
             pid_t owner = -1;
             if (fields >> id >> arrow >> kind >> advisory >> mode >> owner) {
-                if (arrow == "->" && kind == "FLOCK" && owner == child) { return true; }
+                if (arrow == "->" && kind == "FLOCK" && owner == child) {
+                    return true;
+                }
             }
         }
         std::this_thread::yield();
     }
     return false;
 }
-} // 匿名命名空间
+} // namespace
 // 每个用例使用独立临时目录，避免触碰业务锁或与其他测试相互干扰。
 class ProcessFileLockTest : public testing::Test {
 protected:
@@ -295,9 +317,13 @@ TEST_F(ProcessFileLockTest, InheritedDescriptorKeepsLockUntilChildCloses)
     TestChild childGuard(child);
     if (child == 0) {
         char value;
-        if (read(command.fd[0], &value, 1) != 1) { _exit(2); }
+        if (read(command.fd[0], &value, 1) != 1) {
+            _exit(2);
+        }
         parent.Release();
-        if (write(ready.fd[1], "R", 1) != 1) { _exit(3); }
+        if (write(ready.fd[1], "R", 1) != 1) {
+            _exit(3);
+        }
         // 保持子进程存活，证明释放由 close 而不是退出触发。
         _exit(read(command.fd[0], &value, 1) == 1 ? 0 : 4);
     }
@@ -325,8 +351,8 @@ TEST_F(ProcessFileLockTest, ExecClosesInheritedLockWhileChildRemainsAlive)
     ASSERT_GE(child, 0);
     TestChild childGuard(child);
     if (child == 0) {
-        execl("/proc/self/exe", "process_file_lock_test", "--lock-exec-probe",
-              path.c_str(), input.c_str(), output.c_str(), static_cast<char *>(nullptr));
+        execl("/proc/self/exe", "process_file_lock_test", "--lock-exec-probe", path.c_str(), input.c_str(),
+              output.c_str(), static_cast<char *>(nullptr));
         _exit(127);
     }
     ASSERT_TRUE(Receive(ready.fd[0], 'R'));
@@ -337,14 +363,16 @@ TEST_F(ProcessFileLockTest, ExecClosesInheritedLockWhileChildRemainsAlive)
     ASSERT_EQ(write(command.fd[1], "Q", 1), 1);
     EXPECT_TRUE(childGuard.Succeeded());
 }
-} // 命名空间 virtrust
+} // namespace virtrust
 
 // exec 探针不初始化 GoogleTest；确认目标 inode 无描述符引用后通知父进程并等待退出指令。
 int main(int argc, char **argv)
 {
     if (argc == 5 && std::string(argv[1]) == "--lock-exec-probe") {
         struct stat expected {};
-        if (stat(argv[2], &expected) != 0) { return 2; }
+        if (stat(argv[2], &expected) != 0) {
+            return 2;
+        }
         for (const auto &entry : std::filesystem::directory_iterator("/proc/self/fd")) {
             struct stat actual {};
             int fd = std::stoi(entry.path().filename().string());
@@ -352,7 +380,9 @@ int main(int argc, char **argv)
                 return 3;
             }
         }
-        if (write(std::stoi(argv[4]), "R", 1) != 1) { return 4; }
+        if (write(std::stoi(argv[4]), "R", 1) != 1) {
+            return 4;
+        }
         char command;
         return read(std::stoi(argv[3]), &command, 1) == 1 ? 0 : 5;
     }

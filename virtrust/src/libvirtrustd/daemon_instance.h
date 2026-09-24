@@ -5,7 +5,9 @@
 #pragma once
 
 #include <sys/types.h>
+
 #include <utility>
+
 #include "virtrust/base/process_file_lock.h"
 #include "virtrust/link/grpc_server.h"
 
@@ -18,9 +20,16 @@ public:
     // 创建/校验私有目录后尝试独占加锁；不会修改已有目录权限。
     LockOutcome Acquire(const std::string &directory, uid_t owner);
     // 仅描述最近一次 Acquire 的失败原因，不代表业务迁移错误。
-    int LastErrno() const noexcept { return error_; }
+    int LastErrno() const noexcept
+    {
+        return error_;
+    }
     // 带失败步骤、路径和 errno 的诊断；引用有效期不超过本对象生命周期。
-    const std::string &LastError() const noexcept { return detail_; }
+    const std::string &LastError() const noexcept
+    {
+        return detail_;
+    }
+
 private:
     LockOutcome Fail(const std::string &path, const char *step, int error);
     // 实例锁不会因 VIRTRUST_MOCK 被替换为模拟锁。
@@ -36,9 +45,14 @@ private:
 class DaemonRuntime {
 public:
     DaemonRuntime(LinkConfig config, std::string directory, uid_t owner)
-        : directory_(std::move(directory)), owner_(owner), server_(std::move(config)) {}
+        : directory_(std::move(directory)), owner_(owner), server_(std::move(config))
+    {}
     LockOutcome Start();
-    const std::string &LastError() const noexcept { return error_; }
+    const std::string &LastError() const noexcept
+    {
+        return error_;
+    }
+
 private:
     // 生产入口固定为 /run/virtrust，测试使用独立临时目录。
     std::string directory_;
@@ -49,4 +63,4 @@ private:
     DaemonInstance instance_;
     GrpcServer server_;
 };
-} // 命名空间 virtrust
+} // namespace virtrust

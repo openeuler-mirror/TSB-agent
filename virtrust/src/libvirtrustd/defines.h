@@ -21,4 +21,4 @@ constexpr const char *VIRTRUSTD_LOGFILE_NAME = "/var/log/virtrustd.log";
 // 节点实例锁目录不接受配置覆盖，避免不同配置启动多个守护进程。
 constexpr const char *VIRTRUSTD_RUNTIME_DIRECTORY = "/run/virtrust";
 constexpr uint16_t LIBVIRTRUSTD_SERVER_PORT = 5031;
-} // 命名空间 virtrust
+} // namespace virtrust

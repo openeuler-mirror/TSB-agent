@@ -4,16 +4,20 @@
 
 #include "virtrust/base/process_file_lock.h"
 
-#include <cerrno>
 #include <fcntl.h>
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+#include <cerrno>
 #include <utility>
 
 namespace virtrust {
 // 将退出作用域和主动释放统一到同一个清理入口。
-ProcessFileLock::~ProcessFileLock() { Release(); }
+ProcessFileLock::~ProcessFileLock()
+{
+    Release();
+}
 // 取走描述符的同时将来源置空，避免来源析构时关闭已转交的描述符。
 ProcessFileLock::ProcessFileLock(ProcessFileLock &&other) noexcept
     : fd_(std::exchange(other.fd_, -1)), error_(std::exchange(other.error_, 0))
@@ -40,9 +44,9 @@ LockOutcome ProcessFileLock::Acquire(const std::string &path, LockMode mode, Loc
     }
     error_ = 0;
     // candidate 是尚未接管的临时描述符，后续任一步失败都须关闭。
-    // O_CLOEXEC 在成功 exec 时关闭当前进程中的描述符副本，避免新程序继续持有锁，fork 本身仍会继承描述符，不受此标志阻止。
-    // O_NOFOLLOW 拒绝末级符号链接；O_NONBLOCK 是特殊文件打开的防御性标志，不决定 flock 的等待策略。
-    // Linux 的 FIFO 以 O_RDWR 打开本身不等待对端；此标志也不保证所有设备打开均不阻塞。
+    // O_CLOEXEC 在成功 exec 时关闭当前进程中的描述符副本，避免新程序继续持有锁，fork
+    // 本身仍会继承描述符，不受此标志阻止。 O_NOFOLLOW 拒绝末级符号链接；O_NONBLOCK 是特殊文件打开的防御性标志，不决定
+    // flock 的等待策略。 Linux 的 FIFO 以 O_RDWR 打开本身不等待对端；此标志也不保证所有设备打开均不阻塞。
     // 新文件请求权限 0600（仍受 umask 限制）；已有文件不会被自动修改权限。
     int candidate = open(path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, 0600);
     if (candidate < 0) {
@@ -66,8 +70,7 @@ LockOutcome ProcessFileLock::Acquire(const std::string &path, LockMode mode, Loc
     }
 
     // 2、将共享/独占与等待策略分别映射到 flock 标志。
-    const int operation = (mode == LockMode::Shared ? LOCK_SH : LOCK_EX) |
-                          (wait == LockWait::Try ? LOCK_NB : 0);
+    const int operation = (mode == LockMode::Shared ? LOCK_SH : LOCK_EX) | (wait == LockWait::Try ? LOCK_NB : 0);
     // 信号中断不视为锁竞争；重试 flock，本接口不提供取消或超时控制。
     int result;
     do {
@@ -77,8 +80,8 @@ LockOutcome ProcessFileLock::Acquire(const std::string &path, LockMode mode, Loc
         error_ = errno;
         close(candidate);
         // 只有非阻塞加锁的竞争错误才是 Busy，其他故障统一返回 Error。
-        return wait == LockWait::Try && (error_ == EWOULDBLOCK || error_ == EAGAIN)
-                   ? LockOutcome::Busy : LockOutcome::Error;
+        return wait == LockWait::Try && (error_ == EWOULDBLOCK || error_ == EAGAIN) ? LockOutcome::Busy
+                                                                                    : LockOutcome::Error;
     }
     fd_ = candidate;
     return LockOutcome::Acquired;
@@ -94,4 +97,4 @@ void ProcessFileLock::Release() noexcept
         close(std::exchange(fd_, -1));
     }
 }
-} // 命名空间 virtrust
+} // namespace virtrust

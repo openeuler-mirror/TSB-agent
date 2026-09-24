@@ -4,20 +4,27 @@
 
 #include "virtrust/link/grpc_server.h"
 
-#include <cerrno>
-#include <cstring>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
+
+#include <cerrno>
+#include <cstring>
+
 #include "virtrust/base/logger.h"
 #include "virtrust/base/str_utils.h"
 #include "virtrust/link/migration_service_impl.h"
+
 #include "virtrust/link/proto/migrate.grpc.pb.h"
 
 namespace virtrust {
-GrpcServer::GrpcServer(LinkConfig config) : config_(std::move(config)) {}
-GrpcServer::~GrpcServer() { Stop(); }
+GrpcServer::GrpcServer(LinkConfig config) : config_(std::move(config))
+{}
+GrpcServer::~GrpcServer()
+{
+    Stop();
+}
 
 // 调用方必须已持有实例资格；本检查进一步保护非 Socket 文件和仍活动的端点。
 bool GrpcServer::PrepareSocket()
@@ -30,7 +37,7 @@ bool GrpcServer::PrepareSocket()
         }
         return false;
     };
-    sockaddr_un address {};
+    sockaddr_un address{};
     if (config_.udsPath.empty() || config_.udsPath.front() != '/' ||
         config_.udsPath.size() >= sizeof(address.sun_path)) {
         return fail("Invalid UDS path: expected an absolute path within the length limit");
@@ -180,19 +187,28 @@ void GrpcServer::RunServer(std::promise<std::string> ready)
         }
         if (!server_ || tcpPort == 0 || udsPort == 0) {
             // 部分监听成功也算整体失败；先停止服务，再允许局部 service 离开作用域。
-            if (server_) { server_->Shutdown(); }
-            ready.set_value("gRPC startup failed: TCP or UDS listener unavailable; check addresses, permissions and certificates; see gRPC logs for details");
+            if (server_) {
+                server_->Shutdown();
+            }
+            ready.set_value("gRPC startup failed: TCP or UDS listener unavailable; check addresses, permissions and "
+                            "certificates; see gRPC logs for details");
             return;
         }
         ready.set_value("");
         reported = true;
         server_->Wait();
     } catch (const std::exception &error) {
-        if (!reported) { ready.set_value(error.what()); }
-        else { VIRTRUST_LOG_ERROR("|RunServer|Server thread exception|{}", error.what()); }
+        if (!reported) {
+            ready.set_value(error.what());
+        } else {
+            VIRTRUST_LOG_ERROR("|RunServer|Server thread exception|{}", error.what());
+        }
     } catch (...) {
-        if (!reported) { ready.set_value("Unknown exception in gRPC server thread"); }
-        else { VIRTRUST_LOG_ERROR("|RunServer|Unknown exception in server thread"); }
+        if (!reported) {
+            ready.set_value("Unknown exception in gRPC server thread");
+        } else {
+            VIRTRUST_LOG_ERROR("|RunServer|Unknown exception in server thread");
+        }
     }
 }
-} // 命名空间 virtrust
+} // namespace virtrust

@@ -9,17 +9,15 @@ set(VIRTRUST_SOURCE_FILES
 
 # 在模糊测试模式下添加模拟实现源文件。
 if(ENABLE_MOCK_4_FUZZ)
-    list(APPEND VIRTRUST_SOURCE_FILES
-            ${CMAKE_CURRENT_SOURCE_DIR}/mock/grpc_client_mock.cpp
-    )
-else ()
-    list(APPEND VIRTRUST_SOURCE_FILES
-            ${CMAKE_CURRENT_LIST_DIR}/grpc_client.cpp
-    )
+  list(APPEND VIRTRUST_SOURCE_FILES
+       ${CMAKE_CURRENT_SOURCE_DIR}/mock/grpc_client_mock.cpp)
+else()
+  list(APPEND VIRTRUST_SOURCE_FILES
+       ${CMAKE_CURRENT_LIST_DIR}/grpc_client.cpp)
 endif()
 
 set(VIRTRUST_PROTO_SOURCE_FILES ${VIRTRUST_PROTO_SOURCE_FILES}
-                                ${CMAKE_CURRENT_LIST_DIR}/proto/migrate.proto)
+                              ${CMAKE_CURRENT_LIST_DIR}/proto/migrate.proto)
 
 # 添加通信目录的测试。
 add_virtrust_test_if(proto_tools_test)

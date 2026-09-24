@@ -7,8 +7,8 @@
 #include <sys/file.h>
 #include <sys/wait.h>
 #include <unistd.h>
-#include <filesystem>
 
+#include <filesystem>
 #include <future>
 #include <unordered_set>
 
@@ -136,8 +136,7 @@ bool CalcVirshMeasure(std::string_view guestName, VirshMeasureSummary &measureSu
     }
 #else
     auto filePath = std::filesystem::path(__FILE__);
-    auto testXmlPah = (filePath / ".." / ".." / ".." / "test" / "data" / "test.xml")
-    .lexically_normal().string();
+    auto testXmlPah = (filePath / ".." / ".." / ".." / "test" / "data" / "test.xml").lexically_normal().string();
     if (!xmlParser.Parse(verifyConfig, testXmlPah)) {
         VIRTRUST_LOG_ERROR("|main|END|returnF|file: {}|parse xml file failed.", testXmlPah);
         return false;
@@ -251,8 +250,7 @@ bool CheckGuestBeforeStart(std::string_view domainName, std::string &uuid, std::
     // 转换为tsb-agent需要的结构体
     MeasureInfoSet infos;
 
-    bool res = ConvertTsbStruct(measureSummary.bios, infos.bios) &&
-               ConvertTsbStruct(measureSummary.shim, infos.shim) &&
+    bool res = ConvertTsbStruct(measureSummary.bios, infos.bios) && ConvertTsbStruct(measureSummary.shim, infos.shim) &&
                ConvertTsbStruct(measureSummary.kernel, infos.kernel) &&
                ConvertTsbStruct(measureSummary.initrd, infos.initrd) &&
                ConvertTsbStruct(measureSummary.grub, infos.grub) &&
@@ -264,8 +262,8 @@ bool CheckGuestBeforeStart(std::string_view domainName, std::string &uuid, std::
     }
     // 检查度量值是否通过
     auto start = std::chrono::high_resolution_clock::now();
-    auto tsbRc = CheckMeasure(uuid.data(), infos.bios, infos.shim, infos.grub,
-                              infos.grubCfg, infos.kernel, infos.initrd);
+    auto tsbRc =
+        CheckMeasure(uuid.data(), infos.bios, infos.shim, infos.grub, infos.grubCfg, infos.kernel, infos.initrd);
     auto end = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
     VIRTRUST_LOG_DEBUG("|CheckGuestBeforeStart||calc time-consuming, target: func_checkMeasure, duration:{} ms",
@@ -292,8 +290,7 @@ bool UpdateMeasure(std::string_view domainName, std::string &uuid)
         return false;
     }
     MeasureInfoSet infos;
-    bool res = ConvertTsbStruct(measureSummary.bios, infos.bios) &&
-               ConvertTsbStruct(measureSummary.shim, infos.shim) &&
+    bool res = ConvertTsbStruct(measureSummary.bios, infos.bios) && ConvertTsbStruct(measureSummary.shim, infos.shim) &&
                ConvertTsbStruct(measureSummary.kernel, infos.kernel) &&
                ConvertTsbStruct(measureSummary.initrd, infos.initrd) &&
                ConvertTsbStruct(measureSummary.grub, infos.grub) &&
@@ -302,8 +299,8 @@ bool UpdateMeasure(std::string_view domainName, std::string &uuid)
         FreeMeasureInfo(infos);
         return false;
     }
-    auto tsbRc = UpdateMeasure(uuid.data(), infos.bios, infos.shim, infos.grub,
-                               infos.grubCfg, infos.kernel, infos.initrd);
+    auto tsbRc =
+        UpdateMeasure(uuid.data(), infos.bios, infos.shim, infos.grub, infos.grubCfg, infos.kernel, infos.initrd);
     FreeMeasureInfo(infos);
     if (tsbRc != 0) {
         VIRTRUST_LOG_ERROR("update tsb measure failed:{}", domainName);

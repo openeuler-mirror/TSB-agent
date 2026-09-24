@@ -55,4 +55,4 @@ struct MigrationConfig {
     unsigned int flags;
 };
 
-} // 命名空间 virtrust
+} // namespace virtrust
