@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <fstream>
 
+#include "virtrust/base/str_utils.h"
 #include "virtrust/link/grpc_server.h"
 
 namespace virtrust {
@@ -186,6 +187,10 @@ TEST_F(GrpcServerTest, RegularFileDiagnosticIncludesPathAndStage)
     ASSERT_EQ(server.Start(), LinkRc::ERROR);
     EXPECT_NE(server.LastError().find(config.udsPath), std::string::npos);
     EXPECT_NE(server.LastError().find("type check"), std::string::npos);
+    EXPECT_NE(server.LastError().find("tcp=127.0.0.1:0"), std::string::npos);
+    EXPECT_NE(server.LastError().find("server_created=not_attempted"), std::string::npos);
+    EXPECT_NE(server.LastError().find("tcp_result=not_attempted"), std::string::npos);
+    EXPECT_NE(server.LastError().find("uds_result=not_attempted"), std::string::npos);
     EXPECT_TRUE(std::filesystem::is_regular_file(config.udsPath));
 }
 
@@ -199,5 +204,62 @@ TEST_F(GrpcServerTest, StatFailureDiagnosticIncludesErrno)
     EXPECT_NE(server.LastError().find(config.udsPath), std::string::npos);
     EXPECT_NE(server.LastError().find("Initial UDS lstat"), std::string::npos);
     EXPECT_NE(server.LastError().find("errno=" + std::to_string(ENOTDIR)), std::string::npos);
+}
+// 不完整的 TLS 配置不能静默回退到明文监听。
+TEST_F(GrpcServerTest, PartialTlsConfigurationIsRejected)
+{
+    for (unsigned mask = 1; mask < 7; ++mask) {
+        config.skPath = (mask & 1) ? directory + "/key" : "";
+        config.certPath = (mask & 2) ? directory + "/cert" : "";
+        config.caPath = (mask & 4) ? directory + "/ca" : "";
+        GrpcServer server(config);
+        EXPECT_EQ(server.Start(), LinkRc::ERROR) << mask;
+        EXPECT_NE(server.LastError().find("Incomplete TLS configuration"), std::string::npos);
+        EXPECT_NE(server.LastError().find("missing="), std::string::npos);
+        server.Stop();
+    }
+}
+
+TEST_F(GrpcServerTest, ListenerFailureReportsKnownFacts)
+{
+    config.udsPath = directory + "/missing/rpc.sock";
+    GrpcServer server(config);
+    ASSERT_EQ(server.Start(), LinkRc::ERROR);
+    const auto error = server.LastError();
+    EXPECT_NE(error.find("BuildAndStart"), std::string::npos);
+    EXPECT_NE(error.find("tcp=127.0.0.1:0"), std::string::npos);
+    EXPECT_NE(error.find(config.udsPath), std::string::npos);
+    EXPECT_NE(error.find("server_created="), std::string::npos);
+    EXPECT_NE(error.find("tcp_result="), std::string::npos);
+    EXPECT_NE(error.find("uds_result="), std::string::npos);
+}
+
+// 使用本机构建生成的证书，不在仓库中添加任何私钥材料。
+TEST_F(GrpcServerTest, CompleteTlsConfigurationStartsWithoutPlaintextFallback)
+{
+    const std::string certRoot = VIRTRUST_TEST_CERT_DIR;
+    config.skPath = certRoot + "/server/sk.pem";
+    config.certPath = certRoot + "/server/cert.pem";
+    config.caPath = certRoot + "/ca/cert.pem";
+    ASSERT_FALSE(ReadFile(config.skPath).empty());
+    ASSERT_FALSE(ReadFile(config.certPath).empty());
+    ASSERT_FALSE(ReadFile(config.caPath).empty());
+    GrpcServer server(config);
+    ASSERT_EQ(server.Start(), LinkRc::OK) << server.LastError();
+    EXPECT_EQ(server.Stop(), StopResult::Stopped);
+}
+
+TEST_F(GrpcServerTest, NonemptyInvalidCertificatesFailWithoutDowngrade)
+{
+    config.skPath = directory + "/key";
+    config.certPath = directory + "/cert";
+    config.caPath = directory + "/ca";
+    std::ofstream(config.skPath) << "invalid-key";
+    std::ofstream(config.certPath) << "invalid-cert";
+    std::ofstream(config.caPath) << "invalid-ca";
+    GrpcServer server(config);
+    EXPECT_EQ(server.Start(), LinkRc::ERROR);
+    EXPECT_NE(server.LastError().find("BuildAndStart"), std::string::npos);
+    EXPECT_EQ(server.Stop(), StopResult::Stopped);
 }
 } // namespace virtrust

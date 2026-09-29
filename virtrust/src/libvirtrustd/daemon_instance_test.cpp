@@ -14,6 +14,8 @@
 
 #include "libvirtrustd/daemon_instance.h"
 
+#include "virtrust/link/grpc_server_test_peer.h"
+
 namespace {
 // 仅在当前测试线程显式启用时，使一次分配失败；抛出前立即关闭，允许错误诊断分配。
 thread_local bool failNextAllocation = false;
@@ -46,6 +48,13 @@ void operator delete(void *memory, std::size_t) noexcept
 }
 
 namespace virtrust {
+class DaemonRuntimeTestPeer {
+public:
+    static GrpcServer &Server(DaemonRuntime &runtime)
+    {
+        return runtime.server_;
+    }
+};
 // 只操作本用例临时目录；不触碰实际 /run/virtrust 或系统服务。
 class DaemonInstanceTest : public testing::Test {
 protected:
@@ -255,5 +264,148 @@ TEST_F(DaemonInstanceTest, RepeatedStartExceptionDoesNotReleaseExistingInstance)
     DaemonInstance contender;
     EXPECT_EQ(contender.Acquire(directory, geteuid()), LockOutcome::Busy);
     EXPECT_TRUE(std::filesystem::is_socket(config.udsPath));
+}
+
+TEST_F(DaemonInstanceTest, IncompleteStopRetainsQualificationUntilRetry)
+{
+    LinkConfig config{};
+    config.ip = "127.0.0.1";
+    config.udsPath = root + "/rpc.sock";
+    DaemonRuntime runtime(config, directory, geteuid());
+    auto &server = DaemonRuntimeTestPeer::Server(runtime);
+    bool fail = true;
+    GrpcServerTestPeer::Ops(server).shutdown = [&](grpc::Server &value) {
+        if (fail) {
+            throw std::runtime_error("Injected shutdown failure");
+        }
+        value.Shutdown();
+    };
+    ASSERT_EQ(runtime.Start(), LockOutcome::Acquired);
+    EXPECT_EQ(runtime.Stop(), StopResult::Incomplete);
+    DaemonInstance contender;
+    EXPECT_EQ(contender.Acquire(directory, geteuid()), LockOutcome::Busy);
+    EXPECT_EQ(runtime.Start(), LockOutcome::Error);
+    fail = false;
+    EXPECT_EQ(runtime.Stop(), StopResult::Stopped);
+    EXPECT_EQ(contender.Acquire(directory, geteuid()), LockOutcome::Acquired);
+}
+
+TEST_F(DaemonInstanceTest, PathCleanupFailureReleasesQualification)
+{
+    LinkConfig config{};
+    config.ip = "127.0.0.1";
+    config.udsPath = root + "/rpc.sock";
+    DaemonRuntime runtime(config, directory, geteuid());
+    bool fail = false;
+    auto &server = DaemonRuntimeTestPeer::Server(runtime);
+    GrpcServerTestPeer::Ops(server).stat = [&](const char *path, struct stat *info) {
+        if (fail) {
+            errno = EACCES;
+            return -1;
+        }
+        return lstat(path, info);
+    };
+    ASSERT_EQ(runtime.Start(), LockOutcome::Acquired);
+    fail = true;
+    EXPECT_EQ(runtime.Stop(), StopResult::PathCleanupFailed);
+    DaemonInstance contender;
+    EXPECT_EQ(contender.Acquire(directory, geteuid()), LockOutcome::Acquired);
+    fail = false;
+    EXPECT_EQ(runtime.Stop(), StopResult::Stopped);
+}
+
+TEST_F(DaemonInstanceTest, RuntimeFaultExitsNonzeroAndReclaimsResourcesDespiteDiagnosticAllocationFailure)
+{
+    LinkConfig config{};
+    config.ip = "127.0.0.1";
+    config.udsPath = root + "/rpc.sock";
+    DaemonRuntime runtime(config, directory, geteuid());
+    auto &server = DaemonRuntimeTestPeer::Server(runtime);
+    GrpcServerTestPeer::Ops(server).wait = [](grpc::Server &) {
+        throw std::runtime_error("Injected runtime wait failure with a long diagnostic");
+    };
+    GrpcServerTestPeer::Ops(server).destroy = [](std::unique_ptr<grpc::Server> &transport) {
+        transport.reset();
+        // 回收 gRPC 后才注入本层诊断复制失败，避免误伤 gRPC 内部 Shutdown 的分配。
+        failNextAllocation = true;
+    };
+    ASSERT_EQ(runtime.Start(), LockOutcome::Acquired);
+    for (int attempt = 0; attempt < 1000 && !server.HasRuntimeFailure(); ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_TRUE(server.HasRuntimeFailure());
+    const std::function<bool()> stop = [] { return false; };
+    const int result = runtime.RunUntilStopped(stop);
+    const bool injected = !failNextAllocation;
+    failNextAllocation = false;
+    EXPECT_TRUE(injected);
+    EXPECT_NE(result, 0);
+    EXPECT_FALSE(GrpcServerTestPeer::HasThread(server));
+    EXPECT_FALSE(GrpcServerTestPeer::HasServer(server));
+    EXPECT_FALSE(GrpcServerTestPeer::HasService(server));
+    DaemonInstance contender;
+    EXPECT_EQ(contender.Acquire(directory, geteuid()), LockOutcome::Acquired);
+}
+
+TEST_F(DaemonInstanceTest, RequestedStopReturnsZeroAndReleasesQualification)
+{
+    LinkConfig config{};
+    config.ip = "127.0.0.1";
+    config.udsPath = root + "/rpc.sock";
+    DaemonRuntime runtime(config, directory, geteuid());
+    ASSERT_EQ(runtime.Start(), LockOutcome::Acquired);
+    EXPECT_EQ(runtime.RunUntilStopped([] { return true; }), 0);
+    DaemonInstance contender;
+    EXPECT_EQ(contender.Acquire(directory, geteuid()), LockOutcome::Acquired);
+}
+
+// 故障发生在停止请求之后也必须保留具体原因，不能只改变退出码。
+TEST_F(DaemonInstanceTest, FaultDuringShutdownPreservesRuntimeDiagnostic)
+{
+    LinkConfig config{};
+    config.ip = "127.0.0.1";
+    config.udsPath = root + "/rpc.sock";
+    DaemonRuntime runtime(config, directory, geteuid());
+    auto &server = DaemonRuntimeTestPeer::Server(runtime);
+    GrpcServerTestPeer::Ops(server).wait = [](grpc::Server &value) {
+        value.Wait();
+        throw std::runtime_error("Injected fault after shutdown request");
+    };
+    ASSERT_EQ(runtime.Start(), LockOutcome::Acquired);
+    EXPECT_NE(runtime.RunUntilStopped([] { return true; }), 0);
+    EXPECT_NE(runtime.LastError().find("Injected fault after shutdown request"), std::string::npos);
+    DaemonInstance contender;
+    EXPECT_EQ(contender.Acquire(directory, geteuid()), LockOutcome::Acquired);
+}
+
+TEST_F(DaemonInstanceTest, StartupDiagnosticAllocationFailureStillReleasesQualification)
+{
+    LinkConfig config{};
+    config.ip = "127.0.0.1";
+    config.udsPath = root + "/rpc.sock";
+    DaemonRuntime runtime(config, directory, geteuid());
+    auto &server = DaemonRuntimeTestPeer::Server(runtime);
+    int checks = 0;
+    GrpcServerTestPeer::Ops(server).stat = [&](const char *path, struct stat *info) {
+        if (++checks == 2) {
+            errno = EACCES;
+            return -1;
+        }
+        return lstat(path, info);
+    };
+    GrpcServerTestPeer::Ops(server).shutdown = [](grpc::Server &value) {
+        value.Shutdown();
+        // 主线程已进入启动失败清理；让随后复制诊断的分配失败。
+        failNextAllocation = true;
+    };
+    const auto result = runtime.Start();
+    const bool injected = !failNextAllocation;
+    failNextAllocation = false;
+    EXPECT_TRUE(injected);
+    EXPECT_EQ(result, LockOutcome::Error);
+    EXPECT_FALSE(GrpcServerTestPeer::HasThread(server));
+    EXPECT_FALSE(GrpcServerTestPeer::HasService(server));
+    DaemonInstance contender;
+    EXPECT_EQ(contender.Acquire(directory, geteuid()), LockOutcome::Acquired);
 }
 } // namespace virtrust

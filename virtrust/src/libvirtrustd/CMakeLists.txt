@@ -25,5 +25,6 @@ target_link_libraries(libvirtrustd PRIVATE libvirtrustd-obj virtrust-shared
 add_libvirtrustd_test_if(utils_test)
 add_libvirtrustd_test_if(daemon_instance_test)
 if(BUILD_TEST)
+  target_link_libraries(daemon_instance_test PRIVATE grpc++)
   set_tests_properties(daemon_instance_test PROPERTIES TIMEOUT 15)
 endif()

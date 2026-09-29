@@ -6,6 +6,7 @@
 
 #include <sys/types.h>
 
+#include <functional>
 #include <utility>
 
 #include "virtrust/base/process_file_lock.h"
@@ -40,20 +41,26 @@ private:
 
 // 启动编排：实例资格先于 Socket 操作，服务关闭并销毁后才释放资格。
 // 路径/所有者参数用于受信部署与隔离测试，生产入口只传固定常量。
-// 仅供单线程启动编排；Start、LastError、析构不能并发调用。
+// 仅供单线程编排；Start、Stop、RunUntilStopped、LastError、析构不能并发调用。
 // 内层 GrpcServer 的互斥锁不意味着本类线程安全。
 class DaemonRuntime {
 public:
     DaemonRuntime(LinkConfig config, std::string directory, uid_t owner)
         : directory_(std::move(directory)), owner_(owner), server_(std::move(config))
     {}
-    LockOutcome Start();
+    LockOutcome Start() noexcept;
+    // 停止未完成时保留实例资格；仅路径残留时可以释放，后续仍可重试路径清理。
+    StopResult Stop() noexcept;
+    // 沿用一秒检查周期；运行故障或回收失败返回非零，不自动重启。
+    // Shutdown、join 等仍可能长期阻塞，未实现强制超时退出。
+    int RunUntilStopped(const std::function<bool()> &stopRequested) noexcept;
     const std::string &LastError() const noexcept
     {
         return error_;
     }
 
 private:
+    friend class DaemonRuntimeTestPeer;
     // 生产入口固定为 /run/virtrust，测试使用独立临时目录。
     std::string directory_;
     // 生产入口固定为 root；不读取用户配置。

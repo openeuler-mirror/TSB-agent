@@ -7,7 +7,6 @@
 #include <unistd.h>
 
 #include <csignal>
-#include <thread>
 
 #include "libvirtrustd/daemon_instance.h"
 #include "libvirtrustd/defines.h"
@@ -103,14 +102,22 @@ int ProcessArgs(int argc, char **argv)
         // 此对象先停止并销毁服务，再释放锁，覆盖正常退出和启动失败路径。
         DaemonRuntime runtime(ret.value(), VIRTRUSTD_RUNTIME_DIRECTORY, 0);
         if (runtime.Start() != LockOutcome::Acquired) {
-            fmt::print("Daemon startup failed: {}\n", runtime.LastError());
+            try {
+                fmt::print("Daemon startup failed: {}\n", runtime.LastError());
+            } catch (...) {
+            }
             return 1;
         }
 
-        while (g_stopFlag == 0) {
-            std::this_thread::sleep_for(std::chrono::seconds(1));
+        const int result = runtime.RunUntilStopped([] { return g_stopFlag != 0; });
+        if (result != 0) {
+            // 回收已显式执行；输出失败不能妨碍析构兜底或改变失败退出状态。
+            try {
+                fmt::print("Daemon runtime or cleanup failed: {}\n", runtime.LastError());
+            } catch (...) {
+            }
         }
-        // 离开作用域由 runtime 按服务→实例锁顺序清理，不删除实例锁文件。
+        return result;
     } else {
         fmt::print("\n"
                    "  ERROR: Failed to parse config files\n");

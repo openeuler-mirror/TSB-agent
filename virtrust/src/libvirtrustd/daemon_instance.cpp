@@ -9,9 +9,11 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <iterator>
+#include <thread>
 namespace virtrust {
 namespace {
 // 目录遍历中的临时描述符必须在字符串/路径操作抛异常时也关闭。
@@ -45,14 +47,17 @@ private:
 } // namespace
 
 // 锁竞争只返回 Busy；目录错误或服务启动错误保留可读诊断。
-LockOutcome DaemonRuntime::Start()
+LockOutcome DaemonRuntime::Start() noexcept
 {
     // 仅允许本次成功取得资格的调用清理服务，重复 Start 不能停止已有实例。
     bool acquiredHere = false;
     try {
         const auto acquired = instance_.Acquire(directory_, owner_);
         if (acquired != LockOutcome::Acquired) {
-            error_ = instance_.LastError();
+            try {
+                error_ = instance_.LastError();
+            } catch (...) {
+            }
             return acquired;
         }
         acquiredHere = true;
@@ -62,21 +67,74 @@ LockOutcome DaemonRuntime::Start()
         }
         error_ = server_.LastError();
     } catch (const std::exception &error) {
-        error_ = std::string("Daemon startup exception [") + directory_ + "]: " + error.what();
+        try {
+            error_ = std::string("Daemon startup exception [") + directory_ + "]: " + error.what();
+        } catch (...) {
+        }
     } catch (...) {
-        error_ = std::string("Unknown daemon startup exception [") + directory_ + "]";
+        try {
+            error_ = std::string("Unknown daemon startup exception [") + directory_ + "]";
+        } catch (...) {
+        }
     }
     if (acquiredHere) {
         // 即使失败来自异常，也必须先回收服务再释放资格；清理失败则保留资格。
-        try {
-            server_.Stop();
-        } catch (...) {
-            error_ += "; service cleanup threw an exception; retaining instance lock to prevent duplicate startup";
-            return LockOutcome::Error;
-        }
-        instance_ = DaemonInstance{};
+        Stop();
     }
     return LockOutcome::Error;
+}
+
+StopResult DaemonRuntime::Stop() noexcept
+{
+    const auto result = server_.Stop();
+    // 资格释放只取决于资源回收状态，不能依赖诊断字符串是否成功生成。
+    if (result != StopResult::Incomplete) {
+        instance_ = DaemonInstance{};
+    }
+    if (result != StopResult::Stopped) {
+        try {
+            if (!error_.empty()) {
+                error_ += "; ";
+            }
+            error_ += server_.LastError();
+        } catch (...) {
+        }
+    }
+    return result;
+}
+
+int DaemonRuntime::RunUntilStopped(const std::function<bool()> &stopRequested) noexcept
+{
+    bool failed = false;
+    try {
+        while (!server_.HasRuntimeFailure() && !stopRequested()) {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+        }
+    } catch (...) {
+        failed = true;
+        try {
+            error_ = "Daemon main loop failed";
+        } catch (...) {
+        }
+    }
+    const auto stopped = Stop();
+    // join 后运行期诊断已稳定，避免故障标记先于文本发布或故障在停止期间发生而丢失原因。
+    // 未完成停止时仍只能读取当前快照；诊断失败不能影响资源/资格保留策略。
+    if (server_.HasRuntimeFailure()) {
+        failed = true;
+        try {
+            auto runtimeError = server_.RuntimeError();
+            if (runtimeError.empty()) {
+                runtimeError = "Server runtime failure; diagnostic unavailable";
+            }
+            if (!error_.empty()) {
+                runtimeError += "; " + error_;
+            }
+            error_ = std::move(runtimeError);
+        } catch (...) {
+        }
+    }
+    return failed || stopped != StopResult::Stopped ? 1 : 0;
 }
 
 LockOutcome DaemonInstance::Fail(const std::string &path, const char *step, int error)
