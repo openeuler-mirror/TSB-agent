@@ -44,7 +44,7 @@ public:
 private:
     int fd_;
 };
-} // namespace
+} // 匿名命名空间
 
 // 锁竞争只返回 Busy；目录错误或服务启动错误保留可读诊断。
 LockOutcome DaemonRuntime::Start() noexcept
@@ -78,7 +78,7 @@ LockOutcome DaemonRuntime::Start() noexcept
         }
     }
     if (acquiredHere) {
-        // 即使失败来自异常，也必须先回收服务再释放资格；清理失败则保留资格。
+        // 即使失败来自异常，也必须先回收服务再释放资格；资源回收未完成时保留资格。
         Stop();
     }
     return LockOutcome::Error;
@@ -221,4 +221,4 @@ LockOutcome DaemonInstance::Acquire(const std::string &directory, uid_t owner)
     }
     return result;
 }
-} // namespace virtrust
+} // 命名空间 virtrust

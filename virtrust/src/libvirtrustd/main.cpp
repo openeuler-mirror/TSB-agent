@@ -124,7 +124,6 @@ int ProcessArgs(int argc, char **argv)
         // 通信配置创建失败。
         return 1;
     }
-    return 0;
 }
 } // namespace
 } // namespace virtrust

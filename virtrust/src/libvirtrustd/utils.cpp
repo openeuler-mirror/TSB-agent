@@ -146,7 +146,7 @@ LinkConfig ParseJsonDocToConfig(const rapidjson::Document &jsonDoc)
         configBuidler.NAME(tmp.value_or(DEFAULT_VALUE));          \
     } while (0)
 
-    FIND_KEY(caPath, std::string, std::string(LIBVIRTRUSTD_SERVER_ADDR));
+    FIND_KEY(caPath, std::string, std::string(LIBVIRTRUSTD_CA_PATH));
     FIND_KEY(certPath, std::string, std::string(LIBVIRTRUSTD_CERT_PATH));
     FIND_KEY(skPath, std::string, std::string(LIBVIRTRUSTD_SK_PATH));
     FIND_KEY(ip, std::string, std::string(LIBVIRTRUSTD_SERVER_ADDR));

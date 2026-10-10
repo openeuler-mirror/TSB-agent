@@ -70,4 +70,4 @@ private:
     DaemonInstance instance_;
     GrpcServer server_;
 };
-} // namespace virtrust
+} // 命名空间 virtrust

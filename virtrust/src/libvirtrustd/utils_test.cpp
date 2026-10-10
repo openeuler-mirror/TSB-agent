@@ -50,17 +50,15 @@ TEST(UtilsTest, ParseFullConfig)
     std::remove(path.c_str());
 }
 
-// Empty json object: all keys fall back to the defaults in defines.h
+// 空 JSON 对象中缺失的配置项使用 defines.h 中各自的默认值。
 TEST(UtilsTest, MissingKeysUseDefaultValues)
 {
     const std::string path = WriteTempConfig("empty.json", "{}");
 
     auto config = MakeLinkConfigFromJsonFile(path);
     ASSERT_TRUE(config.has_value());
-    // NOTE caPath falls back to LIBVIRTRUSTD_SERVER_ADDR per the current
-    // FIND_KEY(caPath, ...) in utils.cpp; may be intended to be
-    // LIBVIRTRUSTD_CA_PATH instead.
-    EXPECT_EQ(config->caPath, std::string(LIBVIRTRUSTD_SERVER_ADDR));
+    // CA 默认值必须是证书路径，不能误用服务器监听地址。
+    EXPECT_EQ(config->caPath, std::string(LIBVIRTRUSTD_CA_PATH));
     EXPECT_EQ(config->certPath, std::string(LIBVIRTRUSTD_CERT_PATH));
     EXPECT_EQ(config->skPath, std::string(LIBVIRTRUSTD_SK_PATH));
     EXPECT_EQ(config->ip, std::string(LIBVIRTRUSTD_SERVER_ADDR));

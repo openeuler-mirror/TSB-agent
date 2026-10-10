@@ -97,4 +97,4 @@ void ProcessFileLock::Release() noexcept
         close(std::exchange(fd_, -1));
     }
 }
-} // namespace virtrust
+} // 命名空间 virtrust

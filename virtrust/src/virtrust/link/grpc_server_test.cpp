@@ -17,6 +17,47 @@
 #include "virtrust/link/grpc_server.h"
 
 namespace virtrust {
+// 独占持有测试描述符，断言提前返回时也会关闭；不提供复制或转交。
+class TestFd {
+public:
+    explicit TestFd(int fd) : fd_(fd)
+    {}
+    ~TestFd()
+    {
+        if (fd_ >= 0) {
+            close(fd_);
+        }
+    }
+    TestFd(const TestFd &) = delete;
+    TestFd &operator=(const TestFd &) = delete;
+
+private:
+    int fd_;
+};
+
+// 显式关闭并检查写入结果，避免错误夹具被误当作业务失败。
+bool WriteFixture(const std::string &path, const char *text)
+{
+    std::ofstream output(path);
+    output << text;
+    output.close();
+    return output.good();
+}
+
+TEST(TestFdTest, EarlyReturnClosesDescriptor)
+{
+    const int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    ASSERT_GE(fd, 0);
+    const auto leaveEarly = [fd] {
+        TestFd owner(fd);
+        return;
+    };
+    leaveEarly();
+    errno = 0;
+    EXPECT_EQ(close(fd), -1);
+    EXPECT_EQ(errno, EBADF);
+}
+
 // 独立目录与临时端口，不接触真实服务；子进程隔离旧实现 terminate 的故障。
 class GrpcServerTest : public testing::Test {
 protected:
@@ -61,7 +102,7 @@ TEST_F(GrpcServerTest, FailedStartCanBeStoppedAndDestroyedRepeatedly)
 
 TEST_F(GrpcServerTest, ExistingRegularFileIsNeverDeleted)
 {
-    std::ofstream(config.udsPath) << "keep";
+    ASSERT_TRUE(WriteFixture(config.udsPath, "keep"));
     EXPECT_EXIT(
         {
             bool ok;
@@ -89,7 +130,10 @@ TEST_F(GrpcServerTest, SymlinkIsNeverDeleted)
                 ok = server.Start() == LinkRc::ERROR;
                 server.Stop();
             }
-            _exit(ok && std::filesystem::is_symlink(config.udsPath) ? 0 : 1);
+            _exit(ok && std::filesystem::is_symlink(config.udsPath) &&
+                          std::filesystem::read_symlink(config.udsPath) == "missing-target"
+                      ? 0
+                      : 1);
         },
         testing::ExitedWithCode(0), "");
 }
@@ -112,6 +156,7 @@ TEST_F(GrpcServerTest, DestructorStopsSuccessfulServerAndAllowsRestart)
 TEST_F(GrpcServerTest, ActiveSocketIsNotRemovedByAnotherServer)
 {
     const int socketFd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    TestFd socketOwner(socketFd);
     ASSERT_GE(socketFd, 0);
     sockaddr_un address{};
     address.sun_family = AF_UNIX;
@@ -119,7 +164,6 @@ TEST_F(GrpcServerTest, ActiveSocketIsNotRemovedByAnotherServer)
     const int bound = bind(socketFd, reinterpret_cast<sockaddr *>(&address), sizeof(address));
     const int listening = bound == 0 ? listen(socketFd, 8) : -1;
     if (listening != 0) {
-        close(socketFd);
         FAIL() << "cannot create isolated socket";
     }
     struct stat before {};
@@ -136,7 +180,6 @@ TEST_F(GrpcServerTest, ActiveSocketIsNotRemovedByAnotherServer)
             _exit(ok && lstat(config.udsPath.c_str(), &after) == 0 && before.st_ino == after.st_ino ? 0 : 1);
         },
         testing::ExitedWithCode(0), "");
-    close(socketFd);
 }
 // 同一对象反复 Start/Stop，验证线程和服务指针均已回收，诊断也可再次使用。
 TEST_F(GrpcServerTest, SameObjectCanRestartAndReportFailures)
@@ -182,7 +225,7 @@ TEST_F(GrpcServerTest, InvalidTlsReturnsDiagnosticWithoutLeavingThread)
 // 诊断必须指向实际路径和检查阶段，而非只返回无法定位的泛化错误。
 TEST_F(GrpcServerTest, RegularFileDiagnosticIncludesPathAndStage)
 {
-    std::ofstream(config.udsPath) << "keep";
+    ASSERT_TRUE(WriteFixture(config.udsPath, "keep"));
     GrpcServer server(config);
     ASSERT_EQ(server.Start(), LinkRc::ERROR);
     EXPECT_NE(server.LastError().find(config.udsPath), std::string::npos);
@@ -197,7 +240,7 @@ TEST_F(GrpcServerTest, RegularFileDiagnosticIncludesPathAndStage)
 TEST_F(GrpcServerTest, StatFailureDiagnosticIncludesErrno)
 {
     const std::string file = directory + "/not-directory";
-    std::ofstream(file) << "keep";
+    ASSERT_TRUE(WriteFixture(file, "keep"));
     config.udsPath = file + "/rpc.sock";
     GrpcServer server(config);
     ASSERT_EQ(server.Start(), LinkRc::ERROR);
@@ -254,12 +297,12 @@ TEST_F(GrpcServerTest, NonemptyInvalidCertificatesFailWithoutDowngrade)
     config.skPath = directory + "/key";
     config.certPath = directory + "/cert";
     config.caPath = directory + "/ca";
-    std::ofstream(config.skPath) << "invalid-key";
-    std::ofstream(config.certPath) << "invalid-cert";
-    std::ofstream(config.caPath) << "invalid-ca";
+    ASSERT_TRUE(WriteFixture(config.skPath, "invalid-key"));
+    ASSERT_TRUE(WriteFixture(config.certPath, "invalid-cert"));
+    ASSERT_TRUE(WriteFixture(config.caPath, "invalid-ca"));
     GrpcServer server(config);
     EXPECT_EQ(server.Start(), LinkRc::ERROR);
     EXPECT_NE(server.LastError().find("BuildAndStart"), std::string::npos);
     EXPECT_EQ(server.Stop(), StopResult::Stopped);
 }
-} // namespace virtrust
+} // 命名空间 virtrust

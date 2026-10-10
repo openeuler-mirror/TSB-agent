@@ -21,7 +21,15 @@ namespace {
 thread_local bool failNextAllocation = false;
 // 逐个分配点注入，覆盖目录打开之后的路径拼接异常；-1 表示关闭。
 thread_local int failAllocationAfter = -1;
-} // namespace
+// 在被测对象之前声明，最后清除包括析构回调重新开启的分配注入。
+struct AllocationReset {
+    ~AllocationReset()
+    {
+        failNextAllocation = false;
+        failAllocationAfter = -1;
+    }
+};
+} // 匿名命名空间
 
 void *operator new(std::size_t size)
 {
@@ -88,6 +96,27 @@ TEST_F(DaemonInstanceTest, CreatesPrivateDirectoryAndExcludesSecondInstance)
     DaemonInstance next;
     EXPECT_EQ(next.Acquire(directory, geteuid()), LockOutcome::Acquired);
     EXPECT_TRUE(std::filesystem::exists(directory + "/libvirtrustd.lock"));
+}
+
+// 模拟提前返回及析构期间开启注入，不执行分配，直接验证作用域清理。
+TEST_F(DaemonInstanceTest, AllocationResetCoversDestructorInjection)
+{
+    const auto leaveEarly = [] {
+        AllocationReset reset;
+        struct EnableOnDestruction {
+            ~EnableOnDestruction()
+            {
+                failNextAllocation = true;
+                failAllocationAfter = 0;
+            }
+        } enable;
+        return;
+    };
+    leaveEarly();
+    const bool clean = !failNextAllocation && failAllocationAfter == -1;
+    failNextAllocation = false;
+    failAllocationAfter = -1;
+    EXPECT_TRUE(clean);
 }
 
 TEST_F(DaemonInstanceTest, UnsafeDirectoryIsRejectedWithoutChangingPermissions)
@@ -192,6 +221,7 @@ TEST_F(DaemonInstanceTest, RuntimeErrorNamesFailedDirectoryAndStep)
 
 TEST_F(DaemonInstanceTest, StartupExceptionBecomesErrorAndDoesNotKeepInstance)
 {
+    AllocationReset reset;
     LinkConfig config{};
     DaemonRuntime runtime(config, directory, geteuid());
     LockOutcome result = LockOutcome::Acquired;
@@ -212,6 +242,7 @@ TEST_F(DaemonInstanceTest, StartupExceptionBecomesErrorAndDoesNotKeepInstance)
 
 TEST_F(DaemonInstanceTest, DirectoryAllocationFailuresDoNotLeakDescriptors)
 {
+    AllocationReset reset;
     ASSERT_EQ(mkdir(directory.c_str(), 0700), 0);
     const auto countDescriptors = [] {
         std::size_t count = 0;
@@ -245,6 +276,7 @@ TEST_F(DaemonInstanceTest, DirectoryAllocationFailuresDoNotLeakDescriptors)
 
 TEST_F(DaemonInstanceTest, RepeatedStartExceptionDoesNotReleaseExistingInstance)
 {
+    AllocationReset reset;
     LinkConfig config{};
     config.ip = "127.0.0.1";
     config.udsPath = root + "/rpc.sock";
@@ -268,12 +300,13 @@ TEST_F(DaemonInstanceTest, RepeatedStartExceptionDoesNotReleaseExistingInstance)
 
 TEST_F(DaemonInstanceTest, IncompleteStopRetainsQualificationUntilRetry)
 {
+    bool fail = true;
     LinkConfig config{};
     config.ip = "127.0.0.1";
     config.udsPath = root + "/rpc.sock";
     DaemonRuntime runtime(config, directory, geteuid());
     auto &server = DaemonRuntimeTestPeer::Server(runtime);
-    bool fail = true;
+    TestFaultReset<bool> reset(fail);
     GrpcServerTestPeer::Ops(server).shutdown = [&](grpc::Server &value) {
         if (fail) {
             throw std::runtime_error("Injected shutdown failure");
@@ -292,11 +325,12 @@ TEST_F(DaemonInstanceTest, IncompleteStopRetainsQualificationUntilRetry)
 
 TEST_F(DaemonInstanceTest, PathCleanupFailureReleasesQualification)
 {
+    bool fail = false;
     LinkConfig config{};
     config.ip = "127.0.0.1";
     config.udsPath = root + "/rpc.sock";
     DaemonRuntime runtime(config, directory, geteuid());
-    bool fail = false;
+    TestFaultReset<bool> reset(fail);
     auto &server = DaemonRuntimeTestPeer::Server(runtime);
     GrpcServerTestPeer::Ops(server).stat = [&](const char *path, struct stat *info) {
         if (fail) {
@@ -316,6 +350,7 @@ TEST_F(DaemonInstanceTest, PathCleanupFailureReleasesQualification)
 
 TEST_F(DaemonInstanceTest, RuntimeFaultExitsNonzeroAndReclaimsResourcesDespiteDiagnosticAllocationFailure)
 {
+    AllocationReset reset;
     LinkConfig config{};
     config.ip = "127.0.0.1";
     config.udsPath = root + "/rpc.sock";
@@ -380,12 +415,13 @@ TEST_F(DaemonInstanceTest, FaultDuringShutdownPreservesRuntimeDiagnostic)
 
 TEST_F(DaemonInstanceTest, StartupDiagnosticAllocationFailureStillReleasesQualification)
 {
+    AllocationReset reset;
+    int checks = 0;
     LinkConfig config{};
     config.ip = "127.0.0.1";
     config.udsPath = root + "/rpc.sock";
     DaemonRuntime runtime(config, directory, geteuid());
     auto &server = DaemonRuntimeTestPeer::Server(runtime);
-    int checks = 0;
     GrpcServerTestPeer::Ops(server).stat = [&](const char *path, struct stat *info) {
         if (++checks == 2) {
             errno = EACCES;
@@ -408,4 +444,4 @@ TEST_F(DaemonInstanceTest, StartupDiagnosticAllocationFailureStillReleasesQualif
     DaemonInstance contender;
     EXPECT_EQ(contender.Acquire(directory, geteuid()), LockOutcome::Acquired);
 }
-} // namespace virtrust
+} // 命名空间 virtrust

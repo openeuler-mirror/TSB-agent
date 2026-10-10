@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
+ * Copyright (c) Huawei Technologies Co., Ltd. 2026-2026. All rights reserved.
  */
 #include <gtest/gtest.h>
 #include <unistd.h>
@@ -16,6 +16,27 @@
 namespace virtrust {
 namespace {
 using Peer = GrpcServerTestPeer;
+
+// 提前返回时先关闭故障，后析构被保护对象。
+TEST(TestFaultResetTest, ClearsFailureBeforeProtectedObjectDestruction)
+{
+    bool fail = true;
+    bool cleanAtDestruction = false;
+    const auto leaveEarly = [&] {
+        struct Probe {
+            bool &fail;
+            bool &clean;
+            ~Probe()
+            {
+                clean = !fail;
+            }
+        } probe{fail, cleanAtDestruction};
+        TestFaultReset<bool> reset(fail);
+        return;
+    };
+    leaveEarly();
+    EXPECT_TRUE(cleanAtDestruction);
+}
 
 class EmptyError : public std::exception {
 public:
@@ -144,6 +165,7 @@ TEST_F(GrpcServerFaultTest, ShutdownFailureRetainsResourcesUntilRetry)
 {
     std::atomic<bool> fail{true};
     GrpcServer server(config);
+    TestFaultReset<std::atomic<bool>> reset(fail);
     Peer::Ops(server).shutdown = [&](grpc::Server &transport) {
         if (fail.load()) {
             throw std::runtime_error("shutdown failed");
@@ -165,6 +187,7 @@ TEST_F(GrpcServerFaultTest, JoinFailureRetainsResourcesUntilRetry)
 {
     std::atomic<bool> fail{true};
     GrpcServer server(config);
+    TestFaultReset<std::atomic<bool>> reset(fail);
     Peer::Ops(server).join = [&](std::thread &thread) {
         if (fail.load()) {
             throw std::runtime_error("join failed");
@@ -273,9 +296,10 @@ TEST_F(GrpcServerFaultTest, CleanupMissingPathCountsAsStopped)
 TEST_F(GrpcServerFaultTest, StartupReasonSurvivesCleanupFailure)
 {
     bool failShutdown = true;
-    GrpcServer server(config);
-    // 先实际建立监听，再在必要的路径身份校验阶段失败。
     std::atomic<bool> built{false};
+    GrpcServer server(config);
+    TestFaultReset<bool> reset(failShutdown);
+    // 先实际建立监听，再在必要的路径身份校验阶段失败。
     Peer::Ops(server).build = [&](grpc::ServerBuilder &builder) {
         auto transport = builder.BuildAndStart();
         built = true;
@@ -309,8 +333,12 @@ TEST_F(GrpcServerFaultTest, ActualReplacementAfterServerDestructionIsPreserved)
     Peer::Ops(server).destroy = [&](std::unique_ptr<grpc::Server> &transport) {
         transport.reset();
         // 在 gRPC 自身清理之后实际替换路径，验证封装层不会删除新文件。
-        ::unlink(config.udsPath.c_str());
-        std::ofstream(config.udsPath) << "replacement";
+        const int removed = ::unlink(config.udsPath.c_str());
+        ASSERT_TRUE(removed == 0 || errno == ENOENT);
+        std::ofstream output(config.udsPath);
+        output << "replacement";
+        output.close();
+        ASSERT_TRUE(output.good());
     };
     ASSERT_EQ(server.Start(), LinkRc::OK);
     EXPECT_EQ(server.Stop(), StopResult::PathCleanupFailed);
@@ -385,5 +413,5 @@ TEST_F(GrpcServerFaultTest, DestructorTerminatesWhenShutdownCannotSafelyComplete
         },
         "");
 }
-} // namespace
-} // namespace virtrust
+} // 匿名命名空间
+} // 命名空间 virtrust

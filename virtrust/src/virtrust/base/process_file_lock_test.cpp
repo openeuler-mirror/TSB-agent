@@ -115,7 +115,7 @@ bool WaitForBlockedFlock(pid_t child)
     }
     return false;
 }
-} // namespace
+} // 匿名命名空间
 // 每个用例使用独立临时目录，避免触碰业务锁或与其他测试相互干扰。
 class ProcessFileLockTest : public testing::Test {
 protected:
@@ -363,7 +363,7 @@ TEST_F(ProcessFileLockTest, ExecClosesInheritedLockWhileChildRemainsAlive)
     ASSERT_EQ(write(command.fd[1], "Q", 1), 1);
     EXPECT_TRUE(childGuard.Succeeded());
 }
-} // namespace virtrust
+} // 命名空间 virtrust
 
 // exec 探针不初始化 GoogleTest；确认目标 inode 无描述符引用后通知父进程并等待退出指令。
 int main(int argc, char **argv)

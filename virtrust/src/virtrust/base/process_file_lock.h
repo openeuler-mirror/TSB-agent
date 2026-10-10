@@ -54,4 +54,4 @@ private:
     // 保存系统 errno 或接口校验错误，避免清理描述符时丢失故障原因。
     int error_ = 0;
 };
-} // namespace virtrust
+} // 命名空间 virtrust

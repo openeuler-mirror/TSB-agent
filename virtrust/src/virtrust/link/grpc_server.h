@@ -87,10 +87,12 @@ private:
 
     LinkConfig config_;
     Operations operations_;
-    // 串行化 Start/Stop；工作线程不获取此锁，避免等待启动结果或 join 时死锁。
+    // 串行化 Start/Stop 及启动/清理诊断读取，不承担迁移业务请求的并发准入。
+    // 工作线程不获取此锁，避免调用方持锁等待启动结果或 join 时相互等待。
     mutable std::mutex lifecycleMutex_;
     std::string lastError_;
-    // 运行期详情单独加锁，工作线程不获取 lifecycleMutex_，避免等待通知/join 时死锁。
+    // 单独保护运行期诊断文本；只在读写详情或重置故障状态的短作用域内持有。
+    // 故障标志本身为原子变量；此锁与生命周期锁分离，供工作线程独立报告故障。
     mutable std::mutex faultMutex_;
     std::atomic<bool> runtimeFailed_{false};
     std::string runtimeError_;
@@ -104,4 +106,4 @@ private:
     std::unique_ptr<grpc::Server> server_;
     std::unique_ptr<std::thread> server_thread_;
 };
-} // namespace virtrust
+} // 命名空间 virtrust

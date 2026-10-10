@@ -132,10 +132,13 @@ bool GrpcServer::PrepareSocket()
 
 LinkRc GrpcServer::Start() noexcept
 {
+    // 先关联互斥量但不加锁，再在 try 内显式加锁，使加锁异常转换为 ERROR。
+    // guard 跨越后续启动流程；持锁时返回或离开作用域均自动解锁。
     std::unique_lock<std::mutex> guard(lifecycleMutex_, std::defer_lock);
     try {
         guard.lock();
     } catch (...) {
+        // 未取得生命周期锁，不能安全更新受其保护的 lastError_。
         return LinkRc::ERROR;
     }
     // 线程退出但资源未回收时仍禁止重启；重复启动不清理原服务。
@@ -151,6 +154,8 @@ LinkRc GrpcServer::Start() noexcept
     const char *unavailable = "not_attempted";
     try {
         {
+            // 此处只需短作用域持锁：构造时加锁，离开花括号时自动解锁。
+            // 加锁异常由外层 try 捕获；不持故障锁执行 UDS 操作或等待启动通知。
             std::lock_guard<std::mutex> faultGuard(faultMutex_);
             runtimeError_.clear();
             runtimeFailed_.store(false, std::memory_order_release);
@@ -414,7 +419,7 @@ void GrpcServer::RunServer(std::promise<StartupResult> ready) noexcept
     }
     const bool started = result.success;
     try {
-        // 只尝试一次通知；失败时不重发，promise 析构会以 broken_promise 唤醒等待方。
+        // 只尝试一次通知，失败不重发；仅在结果尚未发布时，promise 析构才以 broken_promise 唤醒等待方。
         operations_.publish(ready, std::move(result));
     } catch (...) {
         ReportRuntimeFailure("Startup notification failed");
@@ -431,4 +436,4 @@ void GrpcServer::RunServer(std::promise<StartupResult> ready) noexcept
         ReportRuntimeFailure("Unknown exception in server thread");
     }
 }
-} // namespace virtrust
+} // 命名空间 virtrust
