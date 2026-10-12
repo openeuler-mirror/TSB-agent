@@ -301,6 +301,68 @@ TEST_F(GrpcServerFaultTest, JoinFailureRetainsResourcesUntilRetry)
     ExpectReleased(server);
 }
 
+// 各资源回收阶段分别注入异常；诊断失败不能影响资源保留与关闭故障后的重试。
+TEST_F(GrpcServerFaultTest, StopExceptionDetailsPreserveStageAndRetryContract)
+{
+    const char *stages[] = {"Server Shutdown failed", "Server thread join failed", "Server destruction failed"};
+    for (int stage = 0; stage < 3; ++stage) {
+        for (int kind = 0; kind < 3; ++kind) {
+            SCOPED_TRACE(stage);
+            SCOPED_TRACE(kind);
+            bool fail = true;
+            GrpcServer server(config);
+            TestFaultReset<bool> reset(fail);
+            const auto inject = [&] {
+                if (!fail) {
+                    return;
+                }
+                if (kind == 1) {
+                    throw 42;
+                }
+                throw std::runtime_error("Injected stop detail");
+            };
+            // 按值保存注入函数，引用状态均先于server声明，覆盖析构清理。
+            if (stage == 0) {
+                Peer::Ops(server).shutdown = [inject](grpc::Server &transport) {
+                    inject();
+                    transport.Shutdown();
+                };
+            } else if (stage == 1) {
+                Peer::Ops(server).join = [inject](std::thread &thread) {
+                    inject();
+                    thread.join();
+                };
+            } else {
+                Peer::Ops(server).destroy = [inject](std::unique_ptr<grpc::Server> &transport) {
+                    inject();
+                    transport.reset();
+                };
+            }
+            const auto diagnostic = Peer::Ops(server).diagnostic;
+            Peer::Ops(server).diagnostic = [&, diagnostic](std::string &target, const std::string &text) {
+                if (kind == 2 && fail) {
+                    throw std::bad_alloc();
+                }
+                diagnostic(target, text);
+            };
+            ASSERT_EQ(server.Start(), LinkRc::OK);
+            EXPECT_EQ(server.Stop(), StopResult::Incomplete);
+            if (kind != 2) {
+                const auto detail = server.LastError();
+                EXPECT_NE(detail.find(stages[stage]), std::string::npos);
+                EXPECT_NE(detail.find(kind == 1 ? "Unknown exception" : "Injected stop detail"), std::string::npos);
+            }
+            EXPECT_TRUE(Peer::HasServer(server));
+            EXPECT_TRUE(Peer::HasService(server));
+            EXPECT_EQ(Peer::HasThreadObject(server), stage != 2);
+            fail = false;
+            EXPECT_EQ(server.Stop(), StopResult::Stopped);
+            ExpectReleased(server);
+            EXPECT_FALSE(Peer::HasIdentity(server));
+        }
+    }
+}
+
 TEST_F(GrpcServerFaultTest, ServerDestructionOccursAfterJoinAndBeforeServiceDestruction)
 {
     int destroyed = 0;

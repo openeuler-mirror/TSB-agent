@@ -395,6 +395,87 @@ TEST_F(DaemonInstanceTest, IncompleteStopRetainsQualificationUntilRetry)
     EXPECT_FALSE(GrpcServerTestPeer::HasService(server));
 }
 
+// 两层诊断不能重复嵌入server累计快照；原业务原因与资格保留独立验证。
+TEST_F(DaemonInstanceTest, RepeatedStopReplacesSnapshotAndPreservesBusinessReason)
+{
+    bool fail = true;
+    LinkConfig config{};
+    config.ip = "127.0.0.1";
+    config.udsPath = root + "/rpc.sock";
+    DaemonRuntime runtime(config, directory, geteuid());
+    TestFaultReset<bool> reset(fail);
+    auto &server = DaemonRuntimeTestPeer::Server(runtime);
+    GrpcServerTestPeer::Ops(server).shutdown = [&](grpc::Server &value) {
+        if (fail) {
+            throw std::runtime_error("Injected repeated stop failure");
+        }
+        value.Shutdown();
+    };
+    ASSERT_EQ(runtime.Start(), LockOutcome::Acquired);
+    // 用真实重复启动拒绝产生独立业务原因，避免直接改写内部诊断。
+    EXPECT_EQ(runtime.Start(), LockOutcome::Error);
+    const auto business = runtime.LastError();
+    ASSERT_FALSE(business.empty());
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        EXPECT_EQ(runtime.Stop(), StopResult::Incomplete);
+        EXPECT_EQ(runtime.LastError(), business + "; " + server.LastError());
+        DaemonInstance contender;
+        EXPECT_EQ(contender.Acquire(directory, geteuid()), LockOutcome::Busy);
+    }
+    const auto previous = runtime.LastError();
+    fail = false;
+    EXPECT_EQ(runtime.Stop(), StopResult::Stopped);
+    EXPECT_EQ(runtime.LastError(), previous);
+    DaemonInstance next;
+    EXPECT_EQ(next.Acquire(directory, geteuid()), LockOutcome::Acquired);
+}
+
+// 运行故障前置后，停止重试仍替换同一后缀，不复制上一轮停止快照。
+TEST_F(DaemonInstanceTest, RuntimeFaultPrefixSurvivesRepeatedIncompleteStop)
+{
+    for (bool withBusinessReason : {false, true}) {
+        SCOPED_TRACE(withBusinessReason);
+        bool fail = true;
+        std::promise<void> reported;
+        auto ready = reported.get_future();
+        std::atomic<bool> notified{false};
+        LinkConfig config{};
+        config.ip = "127.0.0.1";
+        config.udsPath = root + "/rpc.sock";
+        DaemonRuntime runtime(config, directory, geteuid());
+        TestFaultReset<bool> reset(fail);
+        auto &server = DaemonRuntimeTestPeer::Server(runtime);
+        GrpcServerTestPeer::Ops(server).wait = [](grpc::Server &) {
+            throw std::runtime_error("Injected runtime fault prefix");
+        };
+        GrpcServerTestPeer::Ops(server).diagnostic = [&](std::string &target, const std::string &text) {
+            target = text;
+            if (text == "Injected runtime fault prefix" && !notified.exchange(true)) {
+                reported.set_value();
+            }
+        };
+        GrpcServerTestPeer::Ops(server).shutdown = [&](grpc::Server &value) {
+            if (fail) {
+                throw std::runtime_error("Injected repeated shutdown failure");
+            }
+            value.Shutdown();
+        };
+        ASSERT_EQ(runtime.Start(), LockOutcome::Acquired);
+        ASSERT_EQ(ready.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+        if (withBusinessReason) {
+            EXPECT_EQ(runtime.Start(), LockOutcome::Error);
+        }
+        const auto business = runtime.LastError();
+        const auto prefix = std::string("Injected runtime fault prefix") + (business.empty() ? "" : "; " + business);
+        EXPECT_NE(runtime.RunUntilStopped([] { return false; }), 0);
+        EXPECT_EQ(runtime.LastError(), prefix + "; " + server.LastError());
+        EXPECT_EQ(runtime.Stop(), StopResult::Incomplete);
+        EXPECT_EQ(runtime.LastError(), prefix + "; " + server.LastError());
+        fail = false;
+        EXPECT_EQ(runtime.Stop(), StopResult::Stopped);
+    }
+}
+
 TEST_F(DaemonInstanceTest, PathCleanupFailureReleasesQualification)
 {
     bool fail = false;

@@ -209,7 +209,7 @@ std::string GrpcServer::LastError() const
     std::lock_guard<std::mutex> guard(lifecycleMutex_);
     return lastError_;
 }
-void GrpcServer::AppendStopError(const char *stage, int error) noexcept
+void GrpcServer::AppendStopError(const char *stage, int error, const char *detail) noexcept
 {
     try {
         std::string text = lastError_;
@@ -219,6 +219,10 @@ void GrpcServer::AppendStopError(const char *stage, int error) noexcept
         text += std::string(stage) + " [uds=" + config_.udsPath + "]";
         if (error != 0) {
             text += ": errno=" + std::to_string(error) + " " + strerror(error);
+        }
+        if (detail != nullptr && *detail != '\0') {
+            text += ": ";
+            text += detail;
         }
         operations_.diagnostic(lastError_, text);
     } catch (...) {
@@ -285,8 +289,12 @@ StopResult GrpcServer::StopUnlocked() noexcept
             return StopResult::Incomplete;
         }
         service_.reset();
+    } catch (const std::exception &error) {
+        // 异常对象在当前catch内有效；诊断尽力复制，失败仍保留未回收资源。
+        AppendStopError(stage, 0, error.what());
+        return StopResult::Incomplete;
     } catch (...) {
-        AppendStopError(stage);
+        AppendStopError(stage, 0, "Unknown exception");
         return StopResult::Incomplete;
     }
     const auto result = CleanupSocket();
@@ -369,14 +377,20 @@ void GrpcServer::RunServer(std::promise<StartupResult> ready) noexcept
         } else {
             auto credentials = grpc::InsecureServerCredentials();
             if (configured == 3) {
+                // 按读取顺序立即检查，定位首个失败凭据；仅报告类别/路径，不输出内容或猜测 errno。
+                const auto readCredential = [](const char *kind, const std::string &path) {
+                    auto content = ReadFile(path);
+                    if (content.empty()) {
+                        throw std::runtime_error(std::string("TLS ") + kind + " read failed or file is empty [" + path +
+                                                 "]; no plaintext fallback");
+                    }
+                    return content;
+                };
                 grpc::SslServerCredentialsOptions::PemKeyCertPair pair;
-                pair.private_key = ReadFile(config_.skPath);
-                pair.cert_chain = ReadFile(config_.certPath);
+                pair.private_key = readCredential("private_key", config_.skPath);
+                pair.cert_chain = readCredential("certificate", config_.certPath);
                 grpc::SslServerCredentialsOptions options;
-                options.pem_root_certs = ReadFile(config_.caPath);
-                if (pair.private_key.empty() || pair.cert_chain.empty() || options.pem_root_certs.empty()) {
-                    throw std::runtime_error("TLS credential read failed or file is empty; no plaintext fallback");
-                }
+                options.pem_root_certs = readCredential("ca", config_.caPath);
                 options.client_certificate_request = GRPC_SSL_REQUEST_AND_REQUIRE_CLIENT_CERTIFICATE_AND_VERIFY;
                 options.pem_key_cert_pairs.push_back(std::move(pair));
                 credentials = grpc::SslServerCredentials(options);

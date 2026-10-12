@@ -6,7 +6,9 @@
 
 #include <sys/types.h>
 
+#include <cstddef>
 #include <functional>
+#include <optional>
 #include <utility>
 
 #include "virtrust/base/process_file_lock.h"
@@ -66,6 +68,8 @@ private:
     // 生产入口固定为 root；不读取用户配置。
     uid_t owner_;
     std::string error_;
+    // error_中需保留的业务前缀长度；失败重试重建分隔符和停止快照后缀。
+    std::optional<std::size_t> stopErrorOffset_;
     // 成员按声明逆序析构，server_ 必须排在 instance_ 后面。
     DaemonInstance instance_;
     GrpcServer server_;

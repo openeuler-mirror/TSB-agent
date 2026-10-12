@@ -56,6 +56,7 @@ LockOutcome DaemonRuntime::Start() noexcept
         if (acquired != LockOutcome::Acquired) {
             try {
                 error_ = instance_.LastError();
+                stopErrorOffset_.reset();
             } catch (...) {
             }
             return acquired;
@@ -63,17 +64,21 @@ LockOutcome DaemonRuntime::Start() noexcept
         acquiredHere = true;
         if (server_.Start() == LinkRc::OK) {
             error_.clear();
+            stopErrorOffset_.reset();
             return LockOutcome::Acquired;
         }
         error_ = server_.LastError();
+        stopErrorOffset_.reset();
     } catch (const std::exception &error) {
         try {
             error_ = std::string("Daemon startup exception [") + directory_ + "]: " + error.what();
+            stopErrorOffset_.reset();
         } catch (...) {
         }
     } catch (...) {
         try {
             error_ = std::string("Unknown daemon startup exception [") + directory_ + "]";
+            stopErrorOffset_.reset();
         } catch (...) {
         }
     }
@@ -93,10 +98,16 @@ StopResult DaemonRuntime::Stop() noexcept
     }
     if (result != StopResult::Stopped) {
         try {
-            if (!error_.empty()) {
-                error_ += "; ";
+            // 在临时文本中重建后再发布；分配失败时原诊断与后缀位置均保持不变。
+            const auto offset = stopErrorOffset_.value_or(error_.size());
+            auto text = error_.substr(0, offset);
+            const auto snapshot = server_.LastError();
+            if (!text.empty() && !snapshot.empty()) {
+                text += "; ";
             }
-            error_ += server_.LastError();
+            text += snapshot;
+            error_ = std::move(text);
+            stopErrorOffset_ = offset;
         } catch (...) {
         }
     }
@@ -114,6 +125,7 @@ int DaemonRuntime::RunUntilStopped(const std::function<bool()> &stopRequested) n
         failed = true;
         try {
             error_ = "Daemon main loop failed";
+            stopErrorOffset_.reset();
         } catch (...) {
         }
     }
@@ -127,10 +139,17 @@ int DaemonRuntime::RunUntilStopped(const std::function<bool()> &stopRequested) n
             if (runtimeError.empty()) {
                 runtimeError = "Server runtime failure; diagnostic unavailable";
             }
-            if (!error_.empty()) {
+            const auto prefixLength = runtimeError.size();
+            const bool hasPrevious = !error_.empty();
+            if (hasPrevious) {
                 runtimeError += "; " + error_;
             }
             error_ = std::move(runtimeError);
+            // 运行原因前置后，停止后缀位置同步平移，后续失败重试仍只替换停止部分。
+            if (stopErrorOffset_) {
+                // 原业务前缀为空时，新分隔符属于可替换后缀，不能计入保留前缀。
+                *stopErrorOffset_ += prefixLength + (*stopErrorOffset_ != 0 ? 2 : 0);
+            }
         } catch (...) {
         }
     }

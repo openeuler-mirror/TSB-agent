@@ -224,6 +224,59 @@ TEST_F(GrpcServerTest, InvalidTlsReturnsDiagnosticWithoutLeavingThread)
     EXPECT_FALSE(server.LastError().empty());
     server.Stop();
 }
+// 逐个凭据失败都必须定位类别和路径；其他凭据使用真实有效夹具，避免前序失败遮蔽目标。
+TEST_F(GrpcServerTest, TlsCredentialReadFailureNamesKindAndPathBeforeBuild)
+{
+    const char *kinds[] = {"private_key", "certificate", "ca"};
+    const std::string certRoot = VIRTRUST_TEST_CERT_DIR;
+    for (int kind = 0; kind < 3; ++kind) {
+        for (bool empty : {false, true}) {
+            SCOPED_TRACE(kind);
+            SCOPED_TRACE(empty);
+            config.skPath = certRoot + "/server/sk.pem";
+            config.certPath = certRoot + "/server/cert.pem";
+            config.caPath = certRoot + "/ca/cert.pem";
+            ASSERT_FALSE(ReadFile(config.skPath).empty());
+            ASSERT_FALSE(ReadFile(config.certPath).empty());
+            ASSERT_FALSE(ReadFile(config.caPath).empty());
+            const auto path = directory + "/" + kinds[kind] + (empty ? "-empty" : "-missing");
+            if (empty) {
+                ASSERT_TRUE(WriteFixture(path, ""));
+                ASSERT_EQ(std::filesystem::file_size(path), 0u);
+            } else {
+                ASSERT_FALSE(std::filesystem::exists(path));
+            }
+            if (kind == 0) {
+                config.skPath = path;
+            } else if (kind == 1) {
+                config.certPath = path;
+            } else {
+                config.caPath = path;
+            }
+            std::atomic<int> builds{0};
+            GrpcServer server(config);
+            GrpcServerTestPeer::Ops(server).build = [&](grpc::ServerBuilder &builder) {
+                ++builds;
+                return builder.BuildAndStart();
+            };
+            EXPECT_EQ(server.Start(), LinkRc::ERROR);
+            const auto detail = server.LastError();
+            const auto expected = std::string("TLS ") + kinds[kind] + " read failed or file is empty [" + path +
+                                  "]; no plaintext fallback";
+            EXPECT_NE(detail.find(expected), std::string::npos);
+            EXPECT_EQ(detail.find("BEGIN PRIVATE KEY"), std::string::npos);
+            EXPECT_EQ(detail.find("BEGIN CERTIFICATE"), std::string::npos);
+            EXPECT_EQ(builds.load(), 0);
+            EXPECT_EQ(server.Stop(), StopResult::Stopped);
+            EXPECT_FALSE(GrpcServerTestPeer::HasThreadObject(server));
+            EXPECT_FALSE(GrpcServerTestPeer::HasServer(server));
+            EXPECT_FALSE(GrpcServerTestPeer::HasService(server));
+            EXPECT_FALSE(GrpcServerTestPeer::HasIdentity(server));
+            EXPECT_FALSE(std::filesystem::exists(config.udsPath));
+        }
+    }
+}
+
 // 诊断必须指向实际路径和检查阶段，而非只返回无法定位的泛化错误。
 TEST_F(GrpcServerTest, RegularFileDiagnosticIncludesPathAndStage)
 {

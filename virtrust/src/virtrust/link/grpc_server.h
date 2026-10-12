@@ -79,7 +79,8 @@ private:
     StopResult StopUnlocked() noexcept;
     StopResult CleanupSocket() noexcept;
     void SetDiagnostic(std::string &target, const char *text) noexcept;
-    void AppendStopError(const char *stage, int error = 0) noexcept;
+    // 尽力追加阶段、系统错误或异常详情；诊断失败不能改变停止分类和资源保留。
+    void AppendStopError(const char *stage, int error = 0, const char *detail = nullptr) noexcept;
     void ReportRuntimeFailure(const char *text) noexcept;
     void Log(const char *text, bool warning = false) noexcept;
     std::string StartupContext(const char *stage, int tcp, int uds, const char *unavailable = nullptr) const;
