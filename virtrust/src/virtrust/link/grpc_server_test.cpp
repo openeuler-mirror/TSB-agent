@@ -8,6 +8,7 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <cerrno>
 #include <cstdlib>
 #include <filesystem>
@@ -15,6 +16,7 @@
 
 #include "virtrust/base/str_utils.h"
 #include "virtrust/link/grpc_server.h"
+#include "virtrust/link/grpc_server_test_peer.h"
 
 namespace virtrust {
 // 独占持有测试描述符，断言提前返回时也会关闭；不提供复制或转交。
@@ -252,14 +254,39 @@ TEST_F(GrpcServerTest, StatFailureDiagnosticIncludesErrno)
 TEST_F(GrpcServerTest, PartialTlsConfigurationIsRejected)
 {
     for (unsigned mask = 1; mask < 7; ++mask) {
+        SCOPED_TRACE(mask);
+        std::atomic<int> builds{0};
         config.skPath = (mask & 1) ? directory + "/key" : "";
         config.certPath = (mask & 2) ? directory + "/cert" : "";
         config.caPath = (mask & 4) ? directory + "/ca" : "";
         GrpcServer server(config);
+        GrpcServerTestPeer::Ops(server).build = [&](grpc::ServerBuilder &builder) {
+            ++builds;
+            return builder.BuildAndStart();
+        };
         EXPECT_EQ(server.Start(), LinkRc::ERROR) << mask;
         EXPECT_NE(server.LastError().find("Incomplete TLS configuration"), std::string::npos);
-        EXPECT_NE(server.LastError().find("missing="), std::string::npos);
-        server.Stop();
+        std::string missing;
+        if (!(mask & 1)) {
+            missing += "private_key ";
+        }
+        if (!(mask & 2)) {
+            missing += "certificate ";
+        }
+        if (!(mask & 4)) {
+            missing += "ca ";
+        }
+        const auto detail = server.LastError();
+        const auto missingPosition = detail.find("missing=");
+        EXPECT_NE(missingPosition, std::string::npos);
+        if (missingPosition != std::string::npos) {
+            EXPECT_EQ(detail.substr(missingPosition + std::string("missing=").size()), missing);
+        }
+        EXPECT_EQ(server.Stop(), StopResult::Stopped);
+        EXPECT_EQ(builds.load(), 0);
+        EXPECT_FALSE(GrpcServerTestPeer::HasThreadObject(server));
+        EXPECT_FALSE(GrpcServerTestPeer::HasServer(server));
+        EXPECT_FALSE(GrpcServerTestPeer::HasService(server));
     }
 }
 

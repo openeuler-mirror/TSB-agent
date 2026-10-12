@@ -2,14 +2,19 @@
  * Copyright (c) Huawei Technologies Co., Ltd. 2026-2026. All rights reserved.
  */
 
+#include <grpcpp/create_channel.h>
+#include <grpcpp/security/credentials.h>
 #include <gtest/gtest.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <future>
 #include <new>
 
 #include "libvirtrustd/daemon_instance.h"
@@ -145,6 +150,35 @@ TEST_F(DaemonInstanceTest, RejectsSymlinkAndWrongExpectedOwner)
     EXPECT_EQ(instance.LastErrno(), EACCES);
 }
 
+// 真实改变隔离目录属主；无权限时明确跳过，不能计为实际属主分支已验收。
+TEST_F(DaemonInstanceTest, RejectsActualDirectoryOwnerMismatch)
+{
+    if (geteuid() != 0) {
+        GTEST_SKIP() << "Requires root to change the isolated directory owner";
+    }
+    ASSERT_EQ(mkdir(directory.c_str(), 0700), 0);
+    ASSERT_EQ(chown(directory.c_str(), 1, static_cast<gid_t>(-1)), 0);
+    struct stat before {};
+    ASSERT_EQ(lstat(directory.c_str(), &before), 0);
+    ASSERT_EQ(before.st_uid, 1u);
+    DaemonInstance instance;
+    EXPECT_EQ(instance.Acquire(directory, geteuid()), LockOutcome::Error);
+    EXPECT_EQ(instance.LastErrno(), EACCES);
+    EXPECT_NE(instance.LastError().find("Instance directory owner mismatch"), std::string::npos);
+    struct stat after {};
+    ASSERT_EQ(lstat(directory.c_str(), &after), 0);
+    EXPECT_EQ(after.st_uid, before.st_uid);
+    EXPECT_EQ(after.st_mode & 07777, 0700u);
+    EXPECT_FALSE(std::filesystem::exists(directory + "/libvirtrustd.lock"));
+}
+
+// 为本用例独立路径创建通道并等待就绪；只验证连接能力，不验证业务 RPC。
+static bool CanConnectToUds(const std::string &path)
+{
+    auto channel = grpc::CreateChannel("unix:" + path, grpc::InsecureChannelCredentials());
+    return channel->WaitForConnected(std::chrono::system_clock::now() + std::chrono::seconds(3));
+}
+
 TEST_F(DaemonInstanceTest, ChildCannotAcquireWhileParentLives)
 {
     DaemonInstance parent;
@@ -176,12 +210,37 @@ TEST_F(DaemonInstanceTest, RuntimeRejectsSecondWithoutTouchingSocket)
         ASSERT_EQ(first.Start(), LockOutcome::Acquired);
         struct stat before {};
         ASSERT_EQ(lstat(config.udsPath.c_str(), &before), 0);
+        int stats = 0, unlinks = 0, starts = 0;
+        std::atomic<int> builds{0};
         DaemonRuntime second(config, directory, geteuid());
+        auto &operations = GrpcServerTestPeer::Ops(DaemonRuntimeTestPeer::Server(second));
+        const auto start = operations.start;
+        operations.stat = [&](const char *path, struct stat *info) {
+            ++stats;
+            return lstat(path, info);
+        };
+        operations.unlink = [&](const char *path) {
+            ++unlinks;
+            return unlink(path);
+        };
+        operations.start = [&, start](GrpcServer &server, std::promise<GrpcServerTestPeer::StartupResult> ready) {
+            ++starts;
+            return start(server, std::move(ready));
+        };
+        operations.build = [&](grpc::ServerBuilder &builder) {
+            ++builds;
+            return builder.BuildAndStart();
+        };
         EXPECT_EQ(second.Start(), LockOutcome::Busy);
+        EXPECT_EQ(stats, 0);
+        EXPECT_EQ(unlinks, 0);
+        EXPECT_EQ(starts, 0);
+        EXPECT_EQ(builds.load(), 0);
         struct stat after {};
         ASSERT_EQ(lstat(config.udsPath.c_str(), &after), 0);
         EXPECT_EQ(before.st_ino, after.st_ino);
         EXPECT_EQ(before.st_dev, after.st_dev);
+        EXPECT_TRUE(CanConnectToUds(config.udsPath));
     }
     DaemonRuntime next(config, directory, geteuid());
     EXPECT_EQ(next.Start(), LockOutcome::Acquired);
@@ -234,8 +293,10 @@ TEST_F(DaemonInstanceTest, StartupExceptionBecomesErrorAndDoesNotKeepInstance)
     } catch (...) {
         escaped = true;
     }
+    const bool injected = !failNextAllocation;
     failNextAllocation = false;
     EXPECT_FALSE(escaped);
+    EXPECT_TRUE(injected);
     EXPECT_EQ(result, LockOutcome::Error);
     EXPECT_FALSE(runtime.LastError().empty());
     DaemonInstance next;
@@ -292,12 +353,15 @@ TEST_F(DaemonInstanceTest, RepeatedStartExceptionDoesNotReleaseExistingInstance)
     } catch (...) {
         escaped = true;
     }
+    const bool injected = !failNextAllocation;
     failNextAllocation = false;
     EXPECT_FALSE(escaped);
+    EXPECT_TRUE(injected);
     EXPECT_EQ(result, LockOutcome::Error);
     DaemonInstance contender;
     EXPECT_EQ(contender.Acquire(directory, geteuid()), LockOutcome::Busy);
     EXPECT_TRUE(std::filesystem::is_socket(config.udsPath));
+    EXPECT_TRUE(CanConnectToUds(config.udsPath));
 }
 
 TEST_F(DaemonInstanceTest, IncompleteStopRetainsQualificationUntilRetry)
@@ -364,11 +428,21 @@ TEST_F(DaemonInstanceTest, PathCleanupFailureReleasesQualification)
 TEST_F(DaemonInstanceTest, RuntimeFaultExitsNonzeroAndReclaimsResourcesDespiteDiagnosticAllocationFailure)
 {
     AllocationReset reset;
+    std::promise<void> faultReported;
+    auto faultFuture = faultReported.get_future();
+    std::atomic<bool> notified{false};
     LinkConfig config{};
     config.ip = "127.0.0.1";
     config.udsPath = root + "/rpc.sock";
     DaemonRuntime runtime(config, directory, geteuid());
     auto &server = DaemonRuntimeTestPeer::Server(runtime);
+    // 故障标志先于诊断发布；观察特定故障详情回调，避免固定次数轮询。
+    GrpcServerTestPeer::Ops(server).diagnostic = [&](std::string &target, const std::string &text) {
+        target = text;
+        if (text.find("Injected runtime wait failure") != std::string::npos && !notified.exchange(true)) {
+            faultReported.set_value();
+        }
+    };
     GrpcServerTestPeer::Ops(server).wait = [](grpc::Server &) {
         throw std::runtime_error("Injected runtime wait failure with a long diagnostic");
     };
@@ -378,9 +452,7 @@ TEST_F(DaemonInstanceTest, RuntimeFaultExitsNonzeroAndReclaimsResourcesDespiteDi
         failNextAllocation = true;
     };
     ASSERT_EQ(runtime.Start(), LockOutcome::Acquired);
-    for (int attempt = 0; attempt < 1000 && !server.HasRuntimeFailure(); ++attempt) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+    ASSERT_EQ(faultFuture.wait_for(std::chrono::seconds(3)), std::future_status::ready);
     ASSERT_TRUE(server.HasRuntimeFailure());
     const std::function<bool()> stop = [] { return false; };
     const int result = runtime.RunUntilStopped(stop);
@@ -429,27 +501,38 @@ TEST_F(DaemonInstanceTest, FaultDuringShutdownPreservesRuntimeDiagnostic)
 TEST_F(DaemonInstanceTest, StartupDiagnosticAllocationFailureStillReleasesQualification)
 {
     AllocationReset reset;
-    int checks = 0;
+    std::atomic<bool> built{false};
+    int postBuildChecks = 0, destroyed = 0;
     LinkConfig config{};
     config.ip = "127.0.0.1";
     config.udsPath = root + "/rpc.sock";
     DaemonRuntime runtime(config, directory, geteuid());
     auto &server = DaemonRuntimeTestPeer::Server(runtime);
+    GrpcServerTestPeer::Ops(server).build = [&](grpc::ServerBuilder &builder) {
+        auto transport = builder.BuildAndStart();
+        built = transport != nullptr;
+        return transport;
+    };
     GrpcServerTestPeer::Ops(server).stat = [&](const char *path, struct stat *info) {
-        if (++checks == 2) {
+        if (built.load()) {
+            ++postBuildChecks;
             errno = EACCES;
             return -1;
         }
         return lstat(path, info);
     };
-    GrpcServerTestPeer::Ops(server).shutdown = [](grpc::Server &value) {
-        value.Shutdown();
-        // 主线程已进入启动失败清理；让随后复制诊断的分配失败。
+    GrpcServerTestPeer::Ops(server).destroy = [&](std::unique_ptr<grpc::Server> &transport) {
+        transport.reset();
+        ++destroyed;
+        // 完成第三方销毁后再开启单次注入，缩小到本层诊断复制的分配范围。
         failNextAllocation = true;
     };
     const auto result = runtime.Start();
     const bool injected = !failNextAllocation;
     failNextAllocation = false;
+    EXPECT_TRUE(built.load());
+    EXPECT_EQ(postBuildChecks, 1);
+    EXPECT_EQ(destroyed, 1);
     EXPECT_TRUE(injected);
     EXPECT_EQ(result, LockOutcome::Error);
     EXPECT_FALSE(GrpcServerTestPeer::HasThread(server));

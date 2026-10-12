@@ -2,12 +2,14 @@
  * Copyright (c) Huawei Technologies Co., Ltd. 2026-2026. All rights reserved.
  */
 #include <gtest/gtest.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 #include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstdlib>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <future>
@@ -87,6 +89,64 @@ TEST_F(GrpcServerFaultTest, EmptyExceptionMessageStillFailsAndReleasesResources)
     EXPECT_EQ(server.Stop(), StopResult::Stopped);
 }
 
+// 按系统结构实际容量构造边界；非法路径必须在系统探测和创建线程之前拒绝。
+TEST_F(GrpcServerFaultTest, InvalidSocketPathsFailBeforeExternalOperations)
+{
+    sockaddr_un address{};
+    const auto capacity = sizeof(address.sun_path);
+    const std::vector<std::string> paths{"", "relative/rpc.sock", "/" + std::string(capacity - 1, 'x'),
+                                         "/" + std::string(capacity, 'x')};
+    for (const auto &path : paths) {
+        SCOPED_TRACE(path.size());
+        int stats = 0, unlinks = 0, starts = 0;
+        std::atomic<int> builds{0};
+        config.udsPath = path;
+        GrpcServer server(config);
+        const auto start = Peer::Ops(server).start;
+        Peer::Ops(server).stat = [&](const char *name, struct stat *info) {
+            ++stats;
+            return ::lstat(name, info);
+        };
+        Peer::Ops(server).unlink = [&](const char *name) {
+            ++unlinks;
+            return ::unlink(name);
+        };
+        Peer::Ops(server).start = [&](GrpcServer &owner, std::promise<Peer::StartupResult> ready) {
+            ++starts;
+            return start(owner, std::move(ready));
+        };
+        Peer::Ops(server).build = [&](grpc::ServerBuilder &builder) {
+            ++builds;
+            return builder.BuildAndStart();
+        };
+        EXPECT_EQ(server.Start(), LinkRc::ERROR);
+        EXPECT_NE(server.LastError().find("Invalid UDS path"), std::string::npos);
+        EXPECT_EQ(server.Stop(), StopResult::Stopped);
+        EXPECT_EQ(stats, 0);
+        EXPECT_EQ(unlinks, 0);
+        EXPECT_EQ(starts, 0);
+        EXPECT_EQ(builds.load(), 0);
+        ExpectReleased(server);
+    }
+}
+
+// sun_path 需为结尾空字符保留一字节，容量减一是本接口接受的最大路径长度。
+TEST_F(GrpcServerFaultTest, MaximumAcceptedSocketPathStartsAndCleansUp)
+{
+    sockaddr_un address{};
+    const auto length = sizeof(address.sun_path) - 1;
+    ASSERT_LT(directory.size() + 1, length);
+    config.udsPath = directory + "/" + std::string(length - directory.size() - 1, 'x');
+    ASSERT_EQ(config.udsPath.size(), length);
+    GrpcServer server(config);
+    ASSERT_EQ(server.Start(), LinkRc::OK) << server.LastError();
+    EXPECT_TRUE(Peer::HasIdentity(server));
+    EXPECT_EQ(server.Stop(), StopResult::Stopped);
+    EXPECT_FALSE(Peer::HasIdentity(server));
+    ExpectReleased(server);
+    EXPECT_FALSE(std::filesystem::exists(config.udsPath));
+}
+
 TEST_F(GrpcServerFaultTest, PrecheckExceptionDoesNotEscapeStart)
 {
     GrpcServer server(config);
@@ -111,13 +171,45 @@ TEST_F(GrpcServerFaultTest, ThreadCreationExceptionCannotReportSuccess)
 
 TEST_F(GrpcServerFaultTest, DiagnosticAndLogAllocationFailuresDoNotPreventCleanup)
 {
+    std::atomic<int> builds{0}, diagnostics{0}, logs{0};
     GrpcServer server(config);
-    Peer::Ops(server).build = [](grpc::ServerBuilder &) -> std::unique_ptr<grpc::Server> { throw std::bad_alloc(); };
-    Peer::Ops(server).diagnostic = [](std::string &, const std::string &) { throw std::bad_alloc(); };
-    Peer::Ops(server).log = [](const char *, bool) { throw std::bad_alloc(); };
+    Peer::Ops(server).build = [&](grpc::ServerBuilder &) -> std::unique_ptr<grpc::Server> {
+        ++builds;
+        throw std::bad_alloc();
+    };
+    Peer::Ops(server).diagnostic = [&](std::string &, const std::string &) {
+        ++diagnostics;
+        throw std::bad_alloc();
+    };
+    Peer::Ops(server).log = [&](const char *, bool) {
+        ++logs;
+        throw std::bad_alloc();
+    };
     EXPECT_EQ(server.Start(), LinkRc::ERROR);
     ExpectReleased(server);
     EXPECT_EQ(server.Stop(), StopResult::Stopped);
+    EXPECT_EQ(builds.load(), 1);
+    EXPECT_GT(diagnostics.load(), 0);
+    EXPECT_GT(logs.load(), 0);
+}
+
+// 构建回调返回空对象时，监听输出仍是初始零值，不能只检查字段是否存在。
+TEST_F(GrpcServerFaultTest, NullBuildReportsExactListenerFacts)
+{
+    int builds = 0;
+    GrpcServer server(config);
+    Peer::Ops(server).build = [&](grpc::ServerBuilder &) -> std::unique_ptr<grpc::Server> {
+        ++builds;
+        return nullptr;
+    };
+    EXPECT_EQ(server.Start(), LinkRc::ERROR);
+    const auto detail = server.LastError();
+    EXPECT_NE(detail.find("BuildAndStart"), std::string::npos);
+    EXPECT_NE(detail.find("server_created=false, tcp_result=0, uds_result=0"), std::string::npos);
+    EXPECT_NE(detail.find("tcp=127.0.0.1:0"), std::string::npos);
+    EXPECT_NE(detail.find("uds=" + config.udsPath), std::string::npos);
+    EXPECT_EQ(builds, 1);
+    ExpectReleased(server);
 }
 
 TEST_F(GrpcServerFaultTest, FailedPublishBreaksPromiseWithoutSecondNotification)
@@ -369,6 +461,40 @@ TEST_F(GrpcServerFaultTest, CleanupMissingPathCountsAsStopped)
     ExpectReleased(server);
 }
 
+// 模拟身份检查通过后路径消失：unlink 的 ENOENT 应容错并清除记录，不再次删除。
+TEST_F(GrpcServerFaultTest, CleanupUnlinkMissingPathClearsIdentityWithoutRetry)
+{
+    std::atomic<bool> cleaning{false};
+    struct stat original {};
+    int unlinks = 0;
+    GrpcServer server(config);
+    Peer::Ops(server).stat = [&](const char *path, struct stat *info) {
+        if (cleaning.load()) {
+            *info = original;
+            return 0;
+        }
+        const int result = ::lstat(path, info);
+        if (result == 0) {
+            original = *info;
+        }
+        return result;
+    };
+    Peer::Ops(server).unlink = [&](const char *) {
+        ++unlinks;
+        errno = ENOENT;
+        return -1;
+    };
+    ASSERT_EQ(server.Start(), LinkRc::OK);
+    EXPECT_TRUE(Peer::HasIdentity(server));
+    cleaning = true;
+    EXPECT_EQ(server.Stop(), StopResult::Stopped);
+    EXPECT_EQ(unlinks, 1);
+    EXPECT_FALSE(Peer::HasIdentity(server));
+    ExpectReleased(server);
+    EXPECT_EQ(server.Stop(), StopResult::Stopped);
+    EXPECT_EQ(unlinks, 1);
+}
+
 TEST_F(GrpcServerFaultTest, StartupReasonSurvivesCleanupFailure)
 {
     bool failShutdown = true;
@@ -430,7 +556,7 @@ TEST_F(GrpcServerFaultTest, ActualReplacementAfterServerDestructionIsPreserved)
 TEST_F(GrpcServerFaultTest, CleanupFailuresRetainOriginalIdentityForRetry)
 {
     // gRPC 可能已移除真实路径；保留启动快照，隔离验证封装层重试语义。
-    for (int fault = 0; fault < 3; ++fault) {
+    for (int fault = 0; fault < 6; ++fault) {
         SCOPED_TRACE(fault);
         std::atomic<bool> cleaning{false};
         std::atomic<bool> fail{true};
@@ -449,9 +575,15 @@ TEST_F(GrpcServerFaultTest, CleanupFailuresRetainOriginalIdentityForRetry)
                 errno = EACCES;
                 return -1;
             }
+            if (fault == 4 && fail.load()) {
+                throw std::runtime_error("Injected cleanup stat exception");
+            }
             *info = original;
             if (fault == 0 && fail.load()) {
                 ++info->st_ino;
+            }
+            if (fault == 3 && fail.load()) {
+                info->st_dev ^= 1;
             }
             return 0;
         };
@@ -461,33 +593,50 @@ TEST_F(GrpcServerFaultTest, CleanupFailuresRetainOriginalIdentityForRetry)
                 errno = EACCES;
                 return -1;
             }
+            if (fault == 5 && fail.load()) {
+                throw std::runtime_error("Injected cleanup unlink exception");
+            }
             return 0;
         };
         ASSERT_EQ(server.Start(), LinkRc::OK);
         cleaning = true;
         EXPECT_EQ(server.Stop(), StopResult::PathCleanupFailed);
+        const char *expectedStage = fault == 1                 ? "UDS cleanup lstat failed"
+                                    : fault == 2               ? "UDS cleanup unlink failed"
+                                    : fault == 4 || fault == 5 ? "Exception during UDS cleanup"
+                                                               : "UDS cleanup identity mismatch";
+        EXPECT_NE(server.LastError().find(expectedStage), std::string::npos);
         EXPECT_TRUE(Peer::HasIdentity(server));
         ExpectReleased(server);
-        EXPECT_EQ(unlinks, fault == 2 ? 1 : 0);
+        EXPECT_EQ(unlinks, fault == 2 || fault == 5 ? 1 : 0);
         fail = false;
         EXPECT_EQ(server.Stop(), StopResult::Stopped);
         EXPECT_FALSE(Peer::HasIdentity(server));
-        EXPECT_EQ(unlinks, fault == 2 ? 2 : 1);
+        EXPECT_EQ(unlinks, fault == 2 || fault == 5 ? 2 : 1);
         EXPECT_EQ(server.Stop(), StopResult::Stopped);
     }
 }
 
 TEST_F(GrpcServerFaultTest, DestructorTerminatesWhenShutdownCannotSafelyComplete)
 {
-    EXPECT_DEATH(
+    EXPECT_EXIT(
         {
             GrpcServer server(config);
             Peer::Ops(server).shutdown = [](grpc::Server &) { throw std::runtime_error("shutdown failed"); };
             if (server.Start() != LinkRc::OK) {
                 _exit(0);
             }
+            // 先确认具体失败条件，再安装子进程专用终止处理器，区别于一般异常崩溃。
+            if (server.Stop() != StopResult::Incomplete) {
+                _exit(0);
+            }
+            std::set_terminate([] {
+                const char marker[] = "Expected incomplete cleanup termination\n";
+                const auto written = ::write(STDERR_FILENO, marker, sizeof(marker) - 1);
+                _exit(written == static_cast<ssize_t>(sizeof(marker) - 1) ? 87 : 88);
+            });
         },
-        "");
+        testing::ExitedWithCode(87), "Expected incomplete cleanup termination");
 }
 } // 匿名命名空间
 } // 命名空间 virtrust
