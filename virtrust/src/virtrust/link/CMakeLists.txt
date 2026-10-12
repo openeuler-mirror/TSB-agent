@@ -32,7 +32,8 @@ add_virtrust_test_if(grpc_server_test)
 add_virtrust_test_if(grpc_server_fault_test)
 if(BUILD_TEST)
   set_tests_properties(grpc_server_test grpc_server_fault_test PROPERTIES TIMEOUT 30)
-  target_link_libraries(grpc_server_fault_test PRIVATE grpc++)
+  # 测试直接调用 gRPC 头文件接口，须显式链接其内联实现使用的底层库。
+  target_link_libraries(grpc_server_fault_test PRIVATE grpc++ grpc gpr)
   target_compile_definitions(grpc_server_test PRIVATE
     VIRTRUST_TEST_CERT_DIR="${PROJECT_SOURCE_DIR}/test")
 endif()

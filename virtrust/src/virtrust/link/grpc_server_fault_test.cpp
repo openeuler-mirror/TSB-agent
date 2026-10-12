@@ -6,10 +6,13 @@
 
 #include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <stdexcept>
+#include <vector>
 
 #include "virtrust/link/grpc_server_test_peer.h"
 
@@ -67,6 +70,7 @@ protected:
     void ExpectReleased(GrpcServer &server)
     {
         EXPECT_FALSE(Peer::HasThread(server));
+        EXPECT_FALSE(Peer::HasThreadObject(server));
         EXPECT_FALSE(Peer::HasServer(server));
         EXPECT_FALSE(Peer::HasService(server));
     }
@@ -208,20 +212,92 @@ TEST_F(GrpcServerFaultTest, JoinFailureRetainsResourcesUntilRetry)
 TEST_F(GrpcServerFaultTest, ServerDestructionOccursAfterJoinAndBeforeServiceDestruction)
 {
     int destroyed = 0;
+    // 回调仅由停止调用线程执行；事件记录的生命周期覆盖 server 析构。
+    std::vector<std::string> events;
     GrpcServer server(config);
+    Peer::Ops(server).shutdown = [&](grpc::Server &transport) {
+        transport.Shutdown();
+        events.emplace_back("shutdown_completed");
+    };
+    Peer::Ops(server).join = [&](std::thread &thread) {
+        EXPECT_TRUE(thread.joinable());
+        thread.join();
+        EXPECT_FALSE(thread.joinable());
+        events.emplace_back("join_completed");
+    };
     Peer::Ops(server).destroy = [&](std::unique_ptr<grpc::Server> &transport) {
         EXPECT_TRUE(Peer::HasService(server));
         EXPECT_FALSE(Peer::HasThread(server));
+        EXPECT_FALSE(Peer::HasThreadObject(server));
+        events.emplace_back("server_destroy_begin");
         transport.reset();
+        EXPECT_TRUE(Peer::HasService(server));
+        events.emplace_back("server_destroy_end");
         ++destroyed;
     };
     for (int attempt = 0; attempt < 2; ++attempt) {
+        events.clear();
         ASSERT_EQ(server.Start(), LinkRc::OK);
         EXPECT_EQ(server.Start(), LinkRc::ERROR);
         EXPECT_EQ(server.Stop(), StopResult::Stopped);
         ExpectReleased(server);
+        EXPECT_EQ(events, (std::vector<std::string>{"shutdown_completed", "join_completed", "server_destroy_begin",
+                                                    "server_destroy_end"}));
     }
     EXPECT_EQ(destroyed, 2);
+}
+
+// 在构建入口暂停启动，停止线程先探测生命周期锁再发起停止；不使用 sleep 推测进度。
+// 探针与 Stop 加锁之间仍有调度窗口，不声称观察到了 Stop 内部的锁等待队列。
+// 同步等待有界，第三方关闭及线程回收若永久阻塞仍由 CTest 进程超时兜底。
+TEST_F(GrpcServerFaultTest, StopScheduledWhileBuildPausedReclaimsAllResources)
+{
+    using namespace std::chrono_literals;
+    std::promise<void> entered;
+    auto enteredFuture = entered.get_future();
+    std::promise<void> release;
+    auto releaseFuture = release.get_future().share();
+    // 仅交接锁探针结果，不表示 Stop 已经进入锁等待。
+    std::promise<bool> lockProbeResult;
+    auto lockProbeFuture = lockProbeResult.get_future();
+    std::atomic<bool> gateTimedOut{false};
+    std::atomic<int> shutdowns{0};
+    GrpcServer server(config);
+    Peer::Ops(server).build = [&](grpc::ServerBuilder &builder) {
+        entered.set_value();
+        if (releaseFuture.wait_for(3s) != std::future_status::ready) {
+            gateTimedOut = true;
+            throw std::runtime_error("Startup test gate timed out");
+        }
+        return builder.BuildAndStart();
+    };
+    Peer::Ops(server).shutdown = [&](grpc::Server &transport) {
+        ++shutdowns;
+        transport.Shutdown();
+    };
+    auto starting = std::async(std::launch::async, [&] { return server.Start(); });
+    // 即使此断言失败，构建门也会自行超时；future 析构等待调用线程退出。
+    ASSERT_EQ(enteredFuture.wait_for(3s), std::future_status::ready);
+    auto stopping = std::async(std::launch::async, [&] {
+        lockProbeResult.set_value(Peer::CanAcquireLifecycleLock(server));
+        return server.Stop();
+    });
+    const auto probeStatus = lockProbeFuture.wait_for(3s);
+    EXPECT_EQ(probeStatus, std::future_status::ready);
+    if (probeStatus == std::future_status::ready) {
+        EXPECT_FALSE(lockProbeFuture.get());
+    }
+    EXPECT_EQ(shutdowns.load(), 0);
+    release.set_value();
+    ASSERT_EQ(starting.wait_for(3s), std::future_status::ready);
+    EXPECT_EQ(starting.get(), LinkRc::OK);
+    ASSERT_EQ(stopping.wait_for(3s), std::future_status::ready);
+    EXPECT_EQ(stopping.get(), StopResult::Stopped);
+    EXPECT_FALSE(gateTimedOut.load());
+    EXPECT_EQ(shutdowns.load(), 1);
+    ExpectReleased(server);
+    EXPECT_FALSE(Peer::HasIdentity(server));
+    EXPECT_EQ(server.Stop(), StopResult::Stopped);
 }
 
 TEST_F(GrpcServerFaultTest, InvalidPostBuildSocketAlwaysFailsStartupWithoutWrapperUnlink)

@@ -42,6 +42,18 @@ public:
     {
         return server.server_thread_ && server.server_thread_->joinable();
     }
+    // 仅在启停完成或已同步暂停时查询；与线程是否可 join 分开验证。
+    static bool HasThreadObject(const GrpcServer &server)
+    {
+        return server.server_thread_ != nullptr;
+    }
+    // 由不持有生命周期锁的测试线程调用；成功时自动释放，不读取受保护资源。
+    // try_lock 失败允许是伪失败，不能单独据此证明另一个线程持锁。
+    static bool CanAcquireLifecycleLock(GrpcServer &server)
+    {
+        std::unique_lock<std::mutex> guard(server.lifecycleMutex_, std::try_to_lock);
+        return guard.owns_lock();
+    }
     static bool HasIdentity(const GrpcServer &server)
     {
         return server.socketIdentityRecorded_;

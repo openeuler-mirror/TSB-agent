@@ -31,7 +31,9 @@ struct AllocationReset {
 };
 } // 匿名命名空间
 
-void *operator new(std::size_t size)
+// 保留测试分配边界，避免优化内联后将配套 malloc/free 误诊为 new/free 不匹配。
+// 仅作用于本测试的替换函数，不关闭 mismatched-new-delete 或全局优化。
+__attribute__((noinline)) void *operator new(std::size_t size)
 {
     if (failNextAllocation || failAllocationAfter == 0) {
         failNextAllocation = false;
@@ -46,11 +48,11 @@ void *operator new(std::size_t size)
     }
     throw std::bad_alloc();
 }
-void operator delete(void *memory) noexcept
+__attribute__((noinline)) void operator delete(void *memory) noexcept
 {
     std::free(memory);
 }
-void operator delete(void *memory, std::size_t) noexcept
+__attribute__((noinline)) void operator delete(void *memory, std::size_t) noexcept
 {
     std::free(memory);
 }
@@ -315,12 +317,18 @@ TEST_F(DaemonInstanceTest, IncompleteStopRetainsQualificationUntilRetry)
     };
     ASSERT_EQ(runtime.Start(), LockOutcome::Acquired);
     EXPECT_EQ(runtime.Stop(), StopResult::Incomplete);
+    EXPECT_TRUE(GrpcServerTestPeer::HasThreadObject(server));
+    EXPECT_TRUE(GrpcServerTestPeer::HasServer(server));
+    EXPECT_TRUE(GrpcServerTestPeer::HasService(server));
     DaemonInstance contender;
     EXPECT_EQ(contender.Acquire(directory, geteuid()), LockOutcome::Busy);
     EXPECT_EQ(runtime.Start(), LockOutcome::Error);
     fail = false;
     EXPECT_EQ(runtime.Stop(), StopResult::Stopped);
     EXPECT_EQ(contender.Acquire(directory, geteuid()), LockOutcome::Acquired);
+    EXPECT_FALSE(GrpcServerTestPeer::HasThreadObject(server));
+    EXPECT_FALSE(GrpcServerTestPeer::HasServer(server));
+    EXPECT_FALSE(GrpcServerTestPeer::HasService(server));
 }
 
 TEST_F(DaemonInstanceTest, PathCleanupFailureReleasesQualification)
@@ -342,10 +350,15 @@ TEST_F(DaemonInstanceTest, PathCleanupFailureReleasesQualification)
     ASSERT_EQ(runtime.Start(), LockOutcome::Acquired);
     fail = true;
     EXPECT_EQ(runtime.Stop(), StopResult::PathCleanupFailed);
+    EXPECT_FALSE(GrpcServerTestPeer::HasThreadObject(server));
+    EXPECT_FALSE(GrpcServerTestPeer::HasServer(server));
+    EXPECT_FALSE(GrpcServerTestPeer::HasService(server));
+    EXPECT_TRUE(GrpcServerTestPeer::HasIdentity(server));
     DaemonInstance contender;
     EXPECT_EQ(contender.Acquire(directory, geteuid()), LockOutcome::Acquired);
     fail = false;
     EXPECT_EQ(runtime.Stop(), StopResult::Stopped);
+    EXPECT_FALSE(GrpcServerTestPeer::HasIdentity(server));
 }
 
 TEST_F(DaemonInstanceTest, RuntimeFaultExitsNonzeroAndReclaimsResourcesDespiteDiagnosticAllocationFailure)
