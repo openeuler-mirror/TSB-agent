@@ -162,8 +162,17 @@ LinkConfig ParseJsonDocToConfig(const rapidjson::Document &jsonDoc)
 std::optional<LinkConfig> MakeLinkConfigFromJsonFile(const std::string &configPath)
 {
     auto jsonDoc = ReadJsonFile(configPath);
-    if (!jsonDoc.has_value() || jsonDoc.value().IsNull()) {
+    if (!jsonDoc.has_value() || !jsonDoc->IsObject()) {
         return std::nullopt;
+    }
+    // 缺省使用固定生产端点；显式配置必须完全一致，避免客户端与服务端连接不同路径。
+    // 按 JSON 字符串实际长度比较，不能把嵌入空字符后的内容截断后误判为合法。
+    if (jsonDoc->HasMember("udsPath")) {
+        const auto &path = (*jsonDoc)["udsPath"];
+        if (!path.IsString() || std::string_view(path.GetString(), path.GetStringLength()) != LIBVIRTRUSTD_UDS_PATH) {
+            VIRTRUST_LOG_ERROR("Invalid udsPath: expected the fixed endpoint {}", LIBVIRTRUSTD_UDS_PATH);
+            return std::nullopt;
+        }
     }
     return ParseJsonDocToConfig(jsonDoc.value());
 }

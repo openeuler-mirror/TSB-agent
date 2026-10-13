@@ -379,7 +379,7 @@ TEST(DomainTest, DefaultValues)
 {
     // Verify default values
     EXPECT_EQ(VIRTRUST_DEFAULT_URI, "qemu:///session");
-    EXPECT_EQ(UDS_PATH, "/tmp/grpc.sock");
+    EXPECT_EQ(UDS_PATH, "/run/virtrust/rpc.sock");
 }
 
 } // namespace virtrust

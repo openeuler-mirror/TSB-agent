@@ -3,12 +3,15 @@
  */
 #include "virtrust/link/grpc_server.h"
 
+#include <fcntl.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
 
 #include <cerrno>
 #include <cstring>
+#include <filesystem>
+#include <iterator>
 #include <stdexcept>
 
 #include "virtrust/base/logger.h"
@@ -16,6 +19,89 @@
 #include "virtrust/link/migration_service_impl.h"
 
 namespace virtrust {
+namespace {
+// 校验期间独占目录描述符；错误文本分配抛异常时也必须关闭。
+class UdsDirectoryFd {
+public:
+    explicit UdsDirectoryFd(int fd) : fd_(fd)
+    {}
+    ~UdsDirectoryFd()
+    {
+        if (fd_ >= 0) {
+            close(fd_);
+        }
+    }
+    UdsDirectoryFd(const UdsDirectoryFd &) = delete;
+    UdsDirectoryFd &operator=(const UdsDirectoryFd &) = delete;
+    int Get() const noexcept
+    {
+        return fd_;
+    }
+    void Reset(int fd) noexcept
+    {
+        if (fd_ >= 0) {
+            close(fd_);
+        }
+        fd_ = fd;
+    }
+
+private:
+    int fd_;
+};
+
+// 只校验，不创建或修复目录。生产目录由 root 实例资格流程建立，配置层固定端点。
+// 底层服务允许测试使用当前用户的独立 0700 目录；不改变生产 root-only 策略。
+std::string CheckUdsParent(const std::string &socketPath)
+{
+    const auto fail = [&](const char *reason, int error = 0) {
+        auto text = std::string("UDS parent check failed [") + socketPath + "]: " + reason;
+        if (error != 0) {
+            text += "; errno=" + std::to_string(error) + " " + strerror(error);
+        }
+        return text;
+    };
+    const std::filesystem::path path(socketPath);
+    if (socketPath.find('\0') != std::string::npos || !path.is_absolute() || path.filename().empty() ||
+        path.filename() == "." || path.filename() == ".." || path.parent_path() == "/") {
+        return fail("expected an absolute endpoint in a dedicated directory");
+    }
+    UdsDirectoryFd directory(open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC));
+    if (directory.Get() < 0) {
+        return fail("cannot open root directory", errno);
+    }
+    const auto relative = path.parent_path().relative_path();
+    for (auto it = relative.begin(); it != relative.end(); ++it) {
+        const auto part = it->string();
+        if (part.empty() || part == "." || part == "..") {
+            return fail("dot or empty directory components are prohibited");
+        }
+        const int fd = openat(directory.Get(), part.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        if (fd < 0) {
+            return fail("cannot open directory; symbolic links are prohibited", errno);
+        }
+        directory.Reset(fd);
+        struct stat info {};
+        if (fstat(directory.Get(), &info) != 0) {
+            return fail("cannot read directory attributes", errno);
+        }
+        if (std::next(it) == relative.end()) {
+            if (info.st_uid != geteuid() || (info.st_mode & 07777) != 0700) {
+                return fail("dedicated directory must be owned by the effective UID with mode 0700");
+            }
+        } else {
+            // 与实例目录策略一致：为隔离测试保留 root 粘滞祖先目录例外，生产 /run 不依赖它。
+            // 此分支也存在于生产构建中，并非测试专用开关或 /tmp 路径白名单。
+            const bool stickyRoot = info.st_uid == 0 && (info.st_mode & S_ISVTX) != 0;
+            if ((info.st_uid != 0 && info.st_uid != geteuid()) || ((info.st_mode & 0022) != 0 && !stickyRoot)) {
+                return fail("untrusted ancestor owner or write permissions");
+            }
+        }
+    }
+    // 不抵御同权限进程在检查后替换目录，也不约束 gRPC 内部的路径清理。
+    return {};
+}
+} // 匿名命名空间
+
 GrpcServer::GrpcServer(LinkConfig config) : config_(std::move(config))
 {
     operations_.log = [](const char *text, bool warning) {
@@ -83,6 +169,11 @@ bool GrpcServer::PrepareSocket()
     if (config_.udsPath.empty() || config_.udsPath.front() != '/' ||
         config_.udsPath.size() >= sizeof(address.sun_path)) {
         return fail("Invalid UDS path: expected an absolute path within the length limit");
+    }
+    const auto parentError = CheckUdsParent(config_.udsPath);
+    if (!parentError.empty()) {
+        lastError_ = parentError;
+        return false;
     }
     struct stat before {};
     if (operations_.stat(config_.udsPath.c_str(), &before) != 0) {
@@ -235,6 +326,12 @@ StopResult GrpcServer::CleanupSocket() noexcept
         return StopResult::Stopped;
     }
     try {
+        // 清理时重新检查，不能沿用启动时的权限快照；拒绝后保留身份供修复目录后重试。
+        const auto parentError = CheckUdsParent(config_.udsPath);
+        if (!parentError.empty()) {
+            AppendStopError("UDS cleanup refused", 0, parentError.c_str());
+            return StopResult::PathCleanupFailed;
+        }
         struct stat current {};
         if (operations_.stat(config_.udsPath.c_str(), &current) != 0) {
             const int error = errno;

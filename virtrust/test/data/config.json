@@ -2,5 +2,6 @@
     "caPath": "/etc/virtrust/certs/ca-cert.pem",
     "certPath": "/etc/virtrust/certs/server-cert.pem",
     "skPath": "/etc/virtrust/certs/server-key.pem",
-    "ip": "127.0.0.1"
+    "ip": "127.0.0.1",
+    "udsPath": "/run/virtrust/rpc.sock"
 }

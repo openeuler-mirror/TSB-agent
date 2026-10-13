@@ -102,6 +102,152 @@ TEST_F(GrpcServerTest, FailedStartCanBeStoppedAndDestroyedRepeatedly)
         testing::ExitedWithCode(0), "");
 }
 
+// 不安全父目录必须在本层 Socket 查询/删除与线程创建/服务构建前拒绝，不自动修改权限。
+TEST_F(GrpcServerTest, UnsafeParentRejectedBeforeSocketOperations)
+{
+    for (mode_t mode : {0755, 0770, 0777}) {
+        SCOPED_TRACE(mode);
+        ASSERT_EQ(chmod(directory.c_str(), mode), 0);
+        int stats = 0;
+        int unlinks = 0;
+        std::atomic<int> starts{0};
+        std::atomic<int> builds{0};
+        {
+            GrpcServer server(config);
+            auto &ops = GrpcServerTestPeer::Ops(server);
+            ops.stat = [&](const char *path, struct stat *info) {
+                ++stats;
+                return lstat(path, info);
+            };
+            ops.unlink = [&](const char *path) {
+                ++unlinks;
+                return unlink(path);
+            };
+            // 保留真实操作，仅统计入口调用；计数器活到 server 析构之后。
+            const auto start = ops.start;
+            ops.start = [&, start](GrpcServer &owner, std::promise<GrpcServerTestPeer::StartupResult> ready) {
+                ++starts;
+                return start(owner, std::move(ready));
+            };
+            ops.build = [&](grpc::ServerBuilder &builder) {
+                ++builds;
+                return builder.BuildAndStart();
+            };
+            EXPECT_EQ(server.Start(), LinkRc::ERROR);
+            EXPECT_NE(server.LastError().find("UDS parent"), std::string::npos);
+            EXPECT_EQ(stats, 0);
+            EXPECT_EQ(unlinks, 0);
+            EXPECT_EQ(starts.load(), 0);
+            EXPECT_EQ(builds.load(), 0);
+            EXPECT_FALSE(GrpcServerTestPeer::HasThreadObject(server));
+            struct stat info {};
+            ASSERT_EQ(stat(directory.c_str(), &info), 0);
+            EXPECT_EQ(info.st_mode & 07777, mode);
+            EXPECT_EQ(server.Stop(), StopResult::Stopped);
+        }
+        // 覆盖显式 Stop 以及析构，不能只观察 Start 返回时刻。
+        EXPECT_EQ(stats, 0);
+        EXPECT_EQ(unlinks, 0);
+        EXPECT_EQ(starts.load(), 0);
+        EXPECT_EQ(builds.load(), 0);
+    }
+    ASSERT_EQ(chmod(directory.c_str(), 0700), 0);
+}
+
+// 即使符号链接指向安全目录，也不允许通过它访问生产端点。
+TEST_F(GrpcServerTest, SymlinkParentRejected)
+{
+    const auto alias = directory + "/alias";
+    ASSERT_EQ(symlink(directory.c_str(), alias.c_str()), 0);
+    config.udsPath = alias + "/rpc.sock";
+    GrpcServer server(config);
+    EXPECT_EQ(server.Start(), LinkRc::ERROR);
+    EXPECT_NE(server.LastError().find("UDS parent"), std::string::npos);
+    EXPECT_FALSE(std::filesystem::exists(directory + "/rpc.sock"));
+}
+
+// 末级 0700 不能抵消上级目录被其他用户替换的风险。
+TEST_F(GrpcServerTest, WritableAncestorRejected)
+{
+    const auto parent = directory + "/private";
+    ASSERT_EQ(mkdir(parent.c_str(), 0700), 0);
+    ASSERT_EQ(chmod(parent.c_str(), 0700), 0);
+    struct stat info {};
+    ASSERT_EQ(stat(parent.c_str(), &info), 0);
+    ASSERT_EQ(info.st_uid, geteuid());
+    ASSERT_EQ(info.st_mode & 07777, static_cast<mode_t>(0700));
+    ASSERT_EQ(chmod(directory.c_str(), 0777), 0);
+    config.udsPath = parent + "/rpc.sock";
+    GrpcServer server(config);
+    EXPECT_EQ(server.Start(), LinkRc::ERROR);
+    EXPECT_NE(server.LastError().find("untrusted ancestor"), std::string::npos);
+    ASSERT_EQ(chmod(directory.c_str(), 0700), 0);
+}
+
+// 实际属主检查需要特权；普通用户测试明确跳过，不能当作已完成权限验收。
+TEST_F(GrpcServerTest, ForeignParentOwnerRejected)
+{
+    if (geteuid() != 0) {
+        GTEST_SKIP() << "Root is required to change directory ownership";
+    }
+    const auto parent = directory + "/foreign";
+    ASSERT_EQ(mkdir(parent.c_str(), 0700), 0);
+    // 只改变属主，不引入属组差异；显式设置并核验权限以排除 umask 影响。
+    ASSERT_EQ(chown(parent.c_str(), 1, static_cast<gid_t>(-1)), 0);
+    ASSERT_EQ(chmod(parent.c_str(), 0700), 0);
+    struct stat info {};
+    ASSERT_EQ(stat(parent.c_str(), &info), 0);
+    ASSERT_EQ(info.st_uid, 1U);
+    ASSERT_EQ(info.st_mode & 07777, static_cast<mode_t>(0700));
+    config.udsPath = parent + "/rpc.sock";
+    GrpcServer server(config);
+    EXPECT_EQ(server.Start(), LinkRc::ERROR);
+    EXPECT_NE(server.LastError().find("owned by the effective UID"), std::string::npos);
+}
+
+// 运行后目录权限变化时先回收资源，拒绝本层 Socket lstat/unlink，并保留身份供修复后重试。
+// 父目录检查仍访问文件系统，gRPC 销毁阶段的内部清理也不在本层计数范围内。
+TEST_F(GrpcServerTest, UnsafeParentPreventsCleanupAndAllowsRetryAfterRepair)
+{
+    int stats = 0;
+    int unlinks = 0;
+    GrpcServer server(config);
+    auto &ops = GrpcServerTestPeer::Ops(server);
+    ops.stat = [&](const char *path, struct stat *info) {
+        ++stats;
+        return lstat(path, info);
+    };
+    ops.unlink = [&](const char *path) {
+        ++unlinks;
+        return unlink(path);
+    };
+    ASSERT_EQ(server.Start(), LinkRc::OK) << server.LastError();
+    // 回调在启动前安装，启动成功后重置计数，后续只观察停止阶段。
+    stats = 0;
+    unlinks = 0;
+    ASSERT_EQ(chmod(directory.c_str(), 0755), 0);
+    EXPECT_EQ(server.Stop(), StopResult::PathCleanupFailed);
+    const auto error = server.LastError();
+    EXPECT_NE(error.find("UDS cleanup refused"), std::string::npos);
+    EXPECT_NE(error.find("mode 0700"), std::string::npos);
+    EXPECT_NE(error.find(config.udsPath), std::string::npos);
+    EXPECT_FALSE(GrpcServerTestPeer::HasThreadObject(server));
+    EXPECT_FALSE(GrpcServerTestPeer::HasServer(server));
+    EXPECT_FALSE(GrpcServerTestPeer::HasService(server));
+    EXPECT_EQ(stats, 0);
+    EXPECT_EQ(unlinks, 0);
+    EXPECT_TRUE(GrpcServerTestPeer::HasIdentity(server));
+    ASSERT_EQ(chmod(directory.c_str(), 0700), 0);
+    EXPECT_EQ(server.Stop(), StopResult::Stopped);
+    EXPECT_FALSE(GrpcServerTestPeer::HasIdentity(server));
+    EXPECT_EQ(stats, 1);
+    // 第三方可能已移除路径，因此允许 ENOENT 成功，不强制本层必须调用 unlink。
+    EXPECT_LE(unlinks, 1);
+    struct stat info {};
+    ASSERT_EQ(lstat(config.udsPath.c_str(), &info), -1);
+    EXPECT_EQ(errno, ENOENT);
+}
+
 TEST_F(GrpcServerTest, ExistingRegularFileIsNeverDeleted)
 {
     ASSERT_TRUE(WriteFixture(config.udsPath, "keep"));
@@ -292,7 +438,7 @@ TEST_F(GrpcServerTest, RegularFileDiagnosticIncludesPathAndStage)
     EXPECT_TRUE(std::filesystem::is_regular_file(config.udsPath));
 }
 
-TEST_F(GrpcServerTest, StatFailureDiagnosticIncludesErrno)
+TEST_F(GrpcServerTest, ParentOpenFailureDiagnosticIncludesErrno)
 {
     const std::string file = directory + "/not-directory";
     ASSERT_TRUE(WriteFixture(file, "keep"));
@@ -300,7 +446,7 @@ TEST_F(GrpcServerTest, StatFailureDiagnosticIncludesErrno)
     GrpcServer server(config);
     ASSERT_EQ(server.Start(), LinkRc::ERROR);
     EXPECT_NE(server.LastError().find(config.udsPath), std::string::npos);
-    EXPECT_NE(server.LastError().find("Initial UDS lstat"), std::string::npos);
+    EXPECT_NE(server.LastError().find("UDS parent check failed"), std::string::npos);
     EXPECT_NE(server.LastError().find("errno=" + std::to_string(ENOTDIR)), std::string::npos);
 }
 // 不完整的 TLS 配置不能静默回退到明文监听。
@@ -343,18 +489,18 @@ TEST_F(GrpcServerTest, PartialTlsConfigurationIsRejected)
     }
 }
 
-TEST_F(GrpcServerTest, ListenerFailureReportsKnownFacts)
+TEST_F(GrpcServerTest, MissingParentReportsListenersNotAttempted)
 {
     config.udsPath = directory + "/missing/rpc.sock";
     GrpcServer server(config);
     ASSERT_EQ(server.Start(), LinkRc::ERROR);
     const auto error = server.LastError();
-    EXPECT_NE(error.find("BuildAndStart"), std::string::npos);
+    EXPECT_NE(error.find("UDS parent check failed"), std::string::npos);
     EXPECT_NE(error.find("tcp=127.0.0.1:0"), std::string::npos);
     EXPECT_NE(error.find(config.udsPath), std::string::npos);
-    EXPECT_NE(error.find("server_created="), std::string::npos);
-    EXPECT_NE(error.find("tcp_result="), std::string::npos);
-    EXPECT_NE(error.find("uds_result="), std::string::npos);
+    EXPECT_NE(error.find("server_created=not_attempted"), std::string::npos);
+    EXPECT_NE(error.find("tcp_result=not_attempted"), std::string::npos);
+    EXPECT_NE(error.find("uds_result=not_attempted"), std::string::npos);
 }
 
 // 使用本机构建生成的证书，不在仓库中添加任何私钥材料。

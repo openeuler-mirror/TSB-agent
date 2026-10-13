@@ -16,7 +16,8 @@ constexpr std::string_view LIBVIRTRUSTD_SERVER_ADDR = "127.0.0.1";
 constexpr std::string_view LIBVIRTRUSTD_CA_PATH = "ca-cert.pem";
 constexpr std::string_view LIBVIRTRUSTD_CERT_PATH = "server-cert.pem";
 constexpr std::string_view LIBVIRTRUSTD_SK_PATH = "server-sk.pem";
-constexpr std::string_view LIBVIRTRUSTD_UDS_PATH = "/tmp/grpc.sock";
+// 生产端点固定在 root 专用目录；与本地 API 客户端保持一致，不接受配置覆盖。
+constexpr std::string_view LIBVIRTRUSTD_UDS_PATH = "/run/virtrust/rpc.sock";
 constexpr const char *VIRTRUSTD_LOGFILE_NAME = "/var/log/virtrustd.log";
 // 节点实例锁目录不接受配置覆盖，避免不同配置启动多个守护进程。
 constexpr const char *VIRTRUSTD_RUNTIME_DIRECTORY = "/run/virtrust";
