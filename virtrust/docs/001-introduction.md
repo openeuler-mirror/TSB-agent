@@ -1,6 +1,6 @@
 # 简介
 
-virtrust 是一个为 openEuler 24.03 LTS SP2 平台设计的可信安全启动（TSB）代理，提供虚拟化可信计算模块（vTPCM）支持，专注于虚拟机域管理和可信度量功能。本仓库实现了完整的可信虚拟机生命周期管理、安全迁移以及相关工具链。
+virtrust 是面向 openEuler 24.03 LTS SP2/SP3 的可信虚拟机管理项目，提供虚拟化可信计算模块（vTPCM）支持，专注于虚拟机域管理和可信度量功能。本仓库实现了可信虚拟机生命周期管理、安全迁移以及相关工具链。依赖的 TSB-agent 组件目前仅支持 SP2；SP3 的真实依赖与全栈部署须另行验收。
 
 ## 项目概述
 
@@ -15,7 +15,8 @@ virtrust 是一个为 openEuler 24.03 LTS SP2 平台设计的可信安全启动�
 
 ### 支持的操作系统
 
-- openEuler 24.03 SP2
+- VIRTRUST：openEuler 24.03 LTS SP2/SP3
+- 依赖的 TSB-agent 组件：目前仅支持 SP2；在 SP3 上使用 mock 库测试通过，不能证明真实 TSB-agent 组件可用，正式部署前须使用真实组件完成验证
 
 ### 用户权限
 
@@ -67,10 +68,9 @@ cmake -DBUILD_TEST=On ..                   # 启用测试（默认开启）
 
 # 编译
 cmake --build . -j$(nproc)
-
-# 安装
-make install
 ```
+
+`make install`/`cmake --install` 不是完整部署步骤：当前 CMake 安装规则不会把 `libvirtrustd` 和 `libvirtrust-shared.so` 安装到服务所需的系统路径。守护进程部署及已有文件的核验要求见[守护进程管理手册](004-virtrustd.md#源码编译安装步骤)。
 
 ### 使用构建脚本
 
@@ -100,14 +100,13 @@ make coverage
 
 ### 库文件
 
-- **`libvirtrust.so`** - 主要共享库，提供所有核心功能
-- **`libvirtrust.a`** - 静态库版本（可选）
+- **`libvirtrust-shared.so`** - 项目共享库，提供核心功能
+- **`libinterfac.so`** - 模拟 TSB 代理共享库，仅用于受控测试；生成文件不等于守护进程会自动加载它
 
 ### 可执行文件
 
 - **`virtrust-sh`** - 命令行工具，用于管理虚拟机
 - **`libvirtrustd`** - 守护进程，提供后台服务
-- **`mock-tsb-agent`** - 模拟 TSB 代理（开发测试用）
 
 ### 测试可执行文件
 
@@ -122,8 +121,8 @@ make coverage
 
 ### 配置和运行时文件
 
-- **日志文件**：`/tmp/virtrust.log`
-- **gRPC 套接字**：`/tmp/grpc.sock`
+- **日志文件**：命令行工具在当前工作目录写入 `virtrust.log`；守护进程使用 `/var/log/virtrustd.log`
+- **本地 gRPC 套接字**：固定为 `/run/virtrust/rpc.sock`，客户端和守护进程使用相同端点；不兼容旧 `/tmp/grpc.sock` 配置。生产运行目录要求 root 拥有且权限为 `0700`，本地访问仅面向 root。
 - **覆盖率报告**：`build/coverage/index.html`（Coverage 构建）
 
 ## 开发指南
@@ -141,18 +140,18 @@ make coverage
 - 使用 cmake-format 格式化 CMake 文件
 - 配置文件：`.clang-format`
 
-### 开发模式 vs 生产模式
+### 开发测试与生产部署
 
-- **开发模式**（默认）：
+- **开发测试**：
 
-  - 使用模拟 TSB 代理
-  - 启用完整测试套件
+  - 可使用模拟 TSB 代理库；构建该库不代表守护进程默认加载它，实际加载来源取决于 `libinterfac.so` 的库搜索结果
+  - 直接使用 CMake 配置时，`BUILD_TEST` 默认开启；`./build.sh` 默认关闭测试
   - 便于开发和调试
-  - 需要将`/opt/test_virtrust/libinterfac.so`拷贝到库文件搜索路径，例，`/usr/lib64`
-- **生产模式**：
+  - RPM 中测试库位于 `/opt/test_virtrust_dir/libinterfac.so`。仅在 mock 测试环境中，确认系统库搜索路径内不存在需要保留的真实 `libinterfac.so` 后，才由管理员手动将测试库放到受控的系统库目录（例如 `/usr/lib64`）；不得无条件覆盖同名库。放置后核对实际加载来源及文件、祖先目录的属主和写权限。测试库不能替代真实组件验收，部署约束见[守护进程管理手册](004-virtrustd.md)。
+- **生产部署**：
 
   - 使用真实 TSB 代理
-  - 禁用测试以减小二进制体积
+  - 可用 `-DBUILD_TEST=Off` 省略测试目标；这不会选择实际加载的 TSB 库
   - 用于生产环境部署
   - 需要联系[业务管理员](https://gitcode.com/strong-wangzhuang)获取`libinterfac.so`，然后拷贝到库文件搜索路径，例，`/usr/lib64`
 

@@ -6,7 +6,7 @@ Virtrust Daemon (virtrustd) 是 virtrust 项目的守护进程服务，提供基
 
 - **默认服务器地址**：127.0.0.1
 - **默认服务器端口**：5031
-- **默认 Unix Socket**：/tmp/grpc.sock
+- **固定 Unix Socket**：`/run/virtrust/rpc.sock`（不接受自定义路径）
 - **默认日志文件**：/var/log/virtrustd.log
 
 ## 系统架构
@@ -36,50 +36,69 @@ libvirt 虚拟化层
 
 ### 系统要求
 
-- **操作系统**：openEuler 24.03 LTS SP2
-- **权限**：需要足够的权限来管理虚拟机
+- **操作系统**：VIRTRUST 支持 openEuler 24.03 LTS SP2/SP3；依赖的 TSB-agent 组件目前仅支持 SP2。在 SP3 上使用 mock 库测试通过，不能证明真实 TSB-agent 组件可用，正式部署前须使用真实组件完成验证
+- **权限**：生产守护进程及本地客户端以 root 运行；不要将服务运行用户替换为普通用户
 - **依赖**：libvirt、gRPC 相关库
+
+root-only 是本项目的部署约束，不是 libvirt 对所有客户端的通用限制；libvirt 的用户会话和系统级连接具有不同的认证授权策略。本节描述支持范围，不表示所有平台的真实依赖、部署和通信验收均已完成。
 
 ### 源码编译安装步骤
 
-1. **编译安装**：
+1. **编译并手动部署守护进程**：
 
 ```bash
 # 在 virtrust 项目目录下
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
-
-# 安装服务
-sudo cmake --install build
 ```
+
+未指定 `CMAKE_INSTALL_PREFIX` 时，项目将构建目录作为默认前缀，程序和库分别输出到其 `bin`、库目录下。当前 `libvirtrustd` 和 `libvirtrust-shared.so` 没有对应的 CMake 安装规则，执行 `cmake --install build` 不会将它们安装到系统目录；服务脚本则固定使用 `/usr/bin/libvirtrustd` 和 `/usr/lib64/libvirtrust-shared.so`，需要管理员手动部署。
+
+先核对 `build/CMakeCache.txt` 中的 `CMAKE_INSTALL_PREFIX`、`CMAKE_INSTALL_BINDIR` 和 `CMAKE_INSTALL_LIBDIR`，以及实际生成的文件。下面以默认前缀为 `build`、库目录为 `lib64` 为例；若使用了其他构建目录或输出位置，请相应调整源路径。不要仅为安装而将前缀改成 `/usr`，当前项目还会把该前缀用于构建输出。
+
+确认目标文件及父目录可信后执行以下手动安装命令。已有部署须先确认无在途业务、停止服务并备份待替换文件；由 RPM 管理的文件应通过 RPM 更新，避免手动替换后与包版本不一致。
+
+```bash
+# 在 virtrust 项目目录下，将本次构建的程序和共享库部署到服务脚本要求的位置
+sudo install -o root -g root -m 0550 build/bin/libvirtrustd /usr/bin/libvirtrustd
+sudo install -o root -g root -m 0550 build/lib64/libvirtrust-shared.so /usr/lib64/libvirtrust-shared.so
+sudo ldconfig
+```
+
+上述步骤部署守护进程及其项目共享库。启动前还须完成下文的配置文件、证书、可信组件库及服务单元准备；`libinterfac.so` 的测试/生产来源和手动放置要求见后文。
 
 2. **创建配置文件**：
 
-```bash
-sudo mkdir -p /etc/virtrust
-sudo cp test/data/config.json /etc/virtrust/config.json
-```
+先检查 `/etc/virtrust` 及目标配置的类型、属主和权限。已有配置应先备份并人工核对，不用示例覆盖；目标是符号链接（包括悬空链接）或状态无法确认时，停止安装并排查。
+
+仅在确认首次安装、目标不存在且父目录不受低权限用户控制后，才复制 `test/data/config.json` 到 `/etc/virtrust/config.json`，并核验目录为 `root:root 0750`、配置为 `root:root 0640`。此处不提供“检查失败即复制”的自动命令，也不保证抵御并发路径替换。
 
 3. **创建日志目录**：
 
-```bash
-sudo mkdir -p /var/log
-sudo touch /var/log/virtrustd.log
-sudo chmod 640 /var/log/virtrustd.log
-```
+确认 `/var/log` 是可信系统目录，已有 `/var/log/virtrustd.log` 不是符号链接或低权限用户控制的对象。日志文件由日志组件打开或创建，打开回调设置权限为 `0600`；已有文件仍需核验属主为 root，`chmod` 不会改变属主。不要用手工 `touch/chmod` 掩盖来源不明的已有文件。
 
-4. **使能libvirtrustd服务**：
+4. **安装并按需使能 libvirtrustd 服务单元**：
+
+以下为未使用 RPM 的源码部署示例，不应整段无条件执行。脚本和 RPM 使用同一份 [service 模板](../src/libvirtrustd/libvirtrustd.service)，都将单元安装到 `/usr/lib/systemd/system/libvirtrustd.service`，权限为 `0644`；单个节点不能混用两种单元管理方式。脚本会查询 RPM 数据库：`TSB-agent` 已安装、目标路径归任何 RPM 包所有，或所有权无法确认时，安装和卸载均在停止服务前报错。即使单元文件已丢失，RPM 文件清单中的所有权仍需遵守。脚本只更新或删除带有脚本来源标记的单元；未知来源的文件由管理员核验。执行有状态操作前还会查询 systemd 当前生效的主单元路径；查询失败或被 `/run` 等其他目录的同名单元覆盖时，拒绝自动安装或卸载。
+
+`install` 不是只读检查：先在目标同目录准备来源标记和完整模板并设置权限，目标已有脚本单元时再尝试停止服务，成功后通过重命名替换单元，随后执行 `daemon-reload`。目标为符号链接或其他非普通文件时拒绝安装。准备或停止失败时保留原单元，并清理暂存文件；停止失败不代表停止动作没有产生影响，仍须核对实际服务状态。替换成功但 `daemon-reload` 失败时，文件已经更新，脚本明确报错，不自动回滚或启动服务。文件替换不保证断电持久性，SIGKILL 或断电也可能留下暂存文件。
+
+安装和卸载通过 `daemon-reload` 重载单元定义，不调用 `daemon-reexec` 重新执行 systemd 管理器。已有部署须先确认无在途业务、备份单元并安排维护窗口，不能把重复安装当作无副作用操作。脚本在替换或删除前会再次核验目标及 RPM 所有权，但核验与文件操作不是同一个原子事务，不能与 RPM 安装、升级或其他管理员操作并发运行。以上流程依赖可信的系统单元目录，不替代对目录属主和权限的核验。
+
+`uninstall` 只处理带脚本标记且未被 RPM 管理的 `/usr/lib/systemd/system/libvirtrustd.service`，依次执行停止、禁用开机自启、删除文件和 `daemon-reload`。任一步失败均保留错误信息并返回非零，不继续后续步骤。停止或禁用失败时不删除单元；这些命令失败仍可能已产生部分影响，应核对服务实际状态。文件删除后重载失败会明确报告该阶段，不自动恢复已执行的操作。RPM 安装的服务单元文件只能通过 RPM 更新或卸载；服务的启动、停止和状态查询仍可通过 `systemctl` 操作。
+
+管理脚本的 `logs [n]` 缺省跟踪最近 50 行日志；显式提供时，`n` 只能是一个正十进制整数。非法或多余参数会报错，且不会调用 `journalctl`。
 
 ```bash
 # libvirtrustd使用systemd管理，管理脚本见 src/libvirtrustd/virtrustd-service.sh
 
-用法: ./virtrustd-service.sh {install|uninstall|start|stop|restart|status|logs|enable|disable}
+# 用法: virtrustd-service.sh {install|uninstall|start|stop|restart|reload|status|logs|enable|disable|help}
 # 示例:
-./virtrustd-service.sh install    # 安装并启用服务
-./virtrustd-service.sh start      # 启动服务
-./virtrustd-service.sh status     # 查看状态
-./virtrustd-service.sh restart    # 重启服务
-./virtrustd-service.sh logs 100   # 查看最近100行日志
+sudo bash src/libvirtrustd/virtrustd-service.sh install   # 安装服务，不自动启用或启动
+sudo bash src/libvirtrustd/virtrustd-service.sh enable    # 需要开机自启时显式启用
+sudo bash src/libvirtrustd/virtrustd-service.sh start     # 配置及依赖就绪后启动
+sudo bash src/libvirtrustd/virtrustd-service.sh status    # 查看状态
+sudo bash src/libvirtrustd/virtrustd-service.sh logs 100  # 查看最近100行并跟随日志
 ```
 
 
@@ -87,17 +106,24 @@ sudo chmod 640 /var/log/virtrustd.log
 
 1. **构建 RPM 包**
 
-```shell
-sh rpm/build_rpm.sh
+```bash
+bash rpm/build_rpm.sh
 ```
 
-2. **安装**
+2. **首次安装**
 
-```shell
-sudo rpm -ivh ~/rpmbuild/RPMS/aarch64/TSB-agent-1.0.0-1.aarch64.rpm
+构建脚本将二进制 RPM 输出到 `~/rpmbuild/RPMS`，并在结束时打印产物目录。按实际构建结果选择名称为 `TSB-agent`、架构与目标系统匹配的运行包；不要选用源码包或 `devel` 等子包代替运行包。版本、发行号和架构以实际包信息为准，不照抄固定文件名。
+
+下面的路径必须替换为实际生成的 RPM 路径。先查看包信息，确认名称、版本及架构后，再执行首次安装命令；已有部署的升级应另行安排维护步骤。
+
+```bash
+rpm -qip /实际路径/TSB-agent-实际版本.实际架构.rpm
+sudo rpm -ivh /实际路径/TSB-agent-实际版本.实际架构.rpm
 ```
 
-服务安装时，会主动在 systemd 服务中完成 libvirtrustd 注册，为确保 libvirtrustd 正常运行需要完成以下配置管理：
+RPM 安装服务单元，并在安装事务后尝试执行 `systemctl daemon-reload`；首次安装不会自动启用开机启动或启动守护进程。完成证书、配置及可信组件库准备后，再按“系统服务管理”章节手动启动，需要开机自启时再执行 `enable`。
+
+启动前需要完成以下证书和配置准备：
 ```
 a、参考 安全配置-TLS证书管理 章节，生成证书
 
@@ -117,8 +143,8 @@ b、参考 配置管理-配置文件格式 章节，将 a 步骤生成的证书�
 # 库文件
 /usr/lib64/libvirtrust-shared.so
 
-# 测试验证版TSB库文件，安装完成在程序启动前后拷贝到库文件搜索路径
-/opt/test_virtrust/libinterfac.so
+# 测试验证版TSB库文件（RPM定义的路径；不是生产真实组件验收）
+/opt/test_virtrust_dir/libinterfac.so
 
 # 示例配置文件
 /etc/virtrust/config.json
@@ -126,6 +152,10 @@ b、参考 配置管理-配置文件格式 章节，将 a 步骤生成的证书�
 # systemd服务文件
 /usr/lib/systemd/system/libvirtrustd.service
 ```
+
+`libinterfac.so` 按库名动态加载，安装到上述目录不等于该目录已进入加载器搜索路径。仅在 mock 测试环境中，先确认系统库搜索路径内不存在需要保留的真实同名库，再由管理员手动将 `/opt/test_virtrust_dir/libinterfac.so` 放到受控的系统库目录（例如 `/usr/lib64`）；不得无条件覆盖已有库。放置后须核对实际加载来源、库文件及所有祖先目录的属主/写权限；不要把低权限用户可写目录加入 root 进程的库搜索路径，也不要用 mock 库替代真实组件验收。
+
+当前服务单元模板虽设置 `TSB_AGENT_SO_MODE=mock`，本仓库代码不读取该变量来选择 mock 或真实库；它不能证明实际加载了哪一个 `libinterfac.so`。生产部署须核验动态加载器选中的库及其来源。外部组件是否自行读取该变量，须单独核查。
 
 3. **卸载**
 
@@ -144,16 +174,30 @@ rpm -e TSB-agent
     "caPath": "/etc/virtrust/certs/ca-cert.pem",
     "certPath": "/etc/virtrust/certs/server-cert.pem",
     "skPath": "/etc/virtrust/certs/server-key.pem",
-    "ip": "127.0.0.1"
+    "ip": "127.0.0.1",
+    "port": 5031,
+    "udsPath": "/run/virtrust/rpc.sock"
 }
 ```
 
 #### 配置字段说明
 
-- `ca_path`：CA 证书文件路径
-- `cert_path`：服务器证书文件路径
-- `sk_path`：服务器私钥文件路径，默认为 "server-key.pem"
+- `caPath`：CA 证书文件路径，缺省为 `/etc/virtrust/certs/ca-cert.pem`
+- `certPath`：服务器证书文件路径，缺省为 `/etc/virtrust/certs/server-cert.pem`
+- `skPath`：服务器私钥文件路径，缺省为 `/etc/virtrust/certs/server-key.pem`
 - `ip`：服务器监听地址，默认为 "127.0.0.1"
+- `port`：TCP 监听端口，缺省为 `5031`；修改时还须核对对端配置
+- `udsPath`：可以省略，或显式填写 `/run/virtrust/rpc.sock`；其他值（包括旧 `/tmp/grpc.sock`、空串及非字符串）使配置加载失败，不会静默替换
+
+字段名区分大小写，使用上面的驼峰名称，不使用 `ca_path` 等下划线名称。缺省证书路径是绝对路径；需要启用 TLS 时，三份证书文件仍须实际存在且可读，也可以显式配置其他可读的绝对路径。仅省略证书字段不会关闭 TLS。
+
+TCP 的三个证书路径全部非空时启用双向 TLS，读取失败或凭据无效不会回退为明文；部分为空时拒绝启动。当前实现允许三个路径全部显式设为空字符串时使用非 TLS TCP，该模式不提供证书认证或传输加密，不应当作安全部署方式。UDS 始终是本地非 TLS 通道，依靠文件系统权限限制访问。
+
+### 运行目录和实例资格
+
+守护进程在任何 Socket 清理或监听前获取 `/run/virtrust` 下的实例锁。缺失目录由实例资格流程创建；已有目录须由 root 拥有且权限严格为 `0700`，不符合时拒绝启动，不自动修复权限。客户端使用同一固定 UDS 路径，不读取此配置来选择其他端点。
+
+启动及本层 Socket 清理前还会检查父目录链的属主、写权限和符号链接约束。不要通过放宽目录权限开放普通用户访问，也不要在服务运行时删除或替换实例锁文件。实例互斥限于相同锁文件命名空间，不保证独立容器之间的物理节点唯一性；路径检查不保证抵御同权限进程替换，也不约束 gRPC 自身的内部清理。
 
 ## 运行和管理
 
@@ -172,15 +216,19 @@ sudo libvirtrustd -d --config /etc/virtrust/config.json
 
 | 选项   | 长选项         | 参数   | 描述         |
 | ---- | ----------- | ---- | ---------- |
-| 无    | `--config`  | 文件路径 | 配置文件路径（必需） |
+| `-c` | `--config`  | 文件路径 | 正常启动时必需的配置文件路径 |
 | `-d` | `--debug`   | 无    | 启用调试模式     |
-| 无    | `--help`    | 无    | 显示帮助信息     |
-| 无    | `--version` | 无    | 显示版本信息     |
+| `-h` | `--help`    | 无    | 显示帮助信息     |
+| `-v` | `--version` | 无    | 显示版本信息     |
 
 ### 系统服务管理
 
 **systemd 服务文件**：
-见 `../src/libvirtrustd/virtrustd.service`
+见 [libvirtrustd.service](../src/libvirtrustd/libvirtrustd.service)。服务名为 `libvirtrustd`，不是 `virtrustd`。RPM spec 与非 RPM 管理脚本均以 `/usr/lib/systemd/system/libvirtrustd.service` 为目标，但不能交叉更新或卸载对方管理的文件。可用 `systemctl show -p FragmentPath libvirtrustd` 核对当前生效的主单元路径。
+
+当前程序未实现 SIGHUP 配置热重载，唯一服务单元模板不声明 `ExecReload`；管理脚本的 `reload` 命令明确报错并返回非零，不发送信号或自动重启。修改配置后的受控重启需要先确认无在途业务；自动拉起进程不等于迁移任务能够恢复。`systemctl daemon-reload` 只重新加载 systemd 单元定义，不会让守护进程重新读取业务配置。
+
+已有部署中的 `/etc/systemd/system/libvirtrustd.service`（包括符号链接）优先于 `/usr/lib` 的同名单元，脚本检测到它会拒绝安装或卸载，不会自动删除。其他高优先级目录中的生效同名单元也会被拒绝，但检查与后续操作并非原子事务，不能与其他特权部署并发。管理员须在无在途业务的维护窗口核对 `systemctl cat libvirtrustd` 与 `FragmentPath`，备份旧单元及 drop-in，确认实际管理来源后人工移除旧单元，执行 `systemctl daemon-reload`，再次确认生效路径为 `/usr/lib/systemd/system/libvirtrustd.service`，然后按需启动或启用服务。旧单元或 drop-in 仍可能包含 `ExecReload`，不能仅凭仓库模板判断线上行为。RPM 部署须通过 RPM 更新，不要运行脚本 `install` 覆盖其文件；从脚本部署改为 RPM 前也须先人工清理旧的脚本部署。
 
 **服务管理命令**：
 
@@ -189,35 +237,35 @@ sudo libvirtrustd -d --config /etc/virtrust/config.json
 sudo systemctl daemon-reload
 
 # 启动服务
-sudo systemctl start virtrustd
+sudo systemctl start libvirtrustd
 
 # 停止服务
-sudo systemctl stop virtrustd
+sudo systemctl stop libvirtrustd
 
 # 重启服务
-sudo systemctl restart virtrustd
+sudo systemctl restart libvirtrustd
 
 # 查看服务状态
-sudo systemctl status virtrustd
+sudo systemctl status libvirtrustd
 
 # 开机自启
-sudo systemctl enable virtrustd
+sudo systemctl enable libvirtrustd
 
 # 禁用开机自启
-sudo systemctl disable virtrustd
+sudo systemctl disable libvirtrustd
 ```
 
 **服务状态监控**
 
 ```bash
 # 检查服务是否运行
-sudo systemctl is-active virtrustd
+sudo systemctl is-active libvirtrustd
 
 # 查看服务日志
-sudo journalctl -u virtrustd -f
+sudo journalctl -u libvirtrustd -f
 
 # 查看最近的错误日志
-sudo journalctl -u virtrustd --since "1 hour ago" -p err
+sudo journalctl -u libvirtrustd --since "1 hour ago" -p err
 ```
 
 ## 日志管理
@@ -232,30 +280,19 @@ sudo journalctl -u virtrustd --since "1 hour ago" -p err
 - **默认级别**：INFO
 - **调试模式**：DEBUG（使用 `--debug` 选项启用）
 
-### 日志轮转配置
+### 日志轮转注意事项
 
-创建 logrotate 配置文件 `/etc/logrotate.d/virtrustd`：
+当前日志适配层使用 spdlog 的 rotating file sink 进行文件轮转（见 `src/virtrust/base/log_adapt.cpp`）。
 
-```
-/var/log/virtrustd.log {
-    daily
-    missingok
-    rotate 30
-    compress
-    delaycompress
-    notifempty
-    create 644 root root
-    postrotate
-        systemctl reload virtrustd
-    endscript
-}
-```
+不要使用 `systemctl reload` 作为日志轮转后的文件重开手段，当前守护进程没有对应的 SIGHUP 处理。外部轮转方案应先核对日志实现并单独验证，不能直接套用依赖热重载的 logrotate 配置。
 
 ## 安全配置
 
 ### TLS 证书管理
 
-以下是生成grpc服务证书的示例， 开源规范允许私钥可以使用明文存储，因此生成的私钥文件暂时未使用口令保护，有其他需要可以以该脚本作为基础进行修改
+以下仅是生成 gRPC 测试证书的示例，不是完整的生产密钥部署方案。示例私钥没有口令保护，不能以“开源规范允许”作为安全依据；生成前须选择可信的私有工作目录，限制访问权限。不要在低权限用户可写的共享目录中以 root 执行。
+
+下面的命令只在私有工作目录生成测试凭据，不自动安装到 `/etc/virtrust/certs`。部署前须核验该目录及祖先目录的类型、属主和权限；已有证书或私钥须先备份并确认更新方案，不得用示例文件无条件覆盖。首次部署由管理员创建 `root:root 0700` 的专用证书目录，并以受控方式安装所需文件；安装后核验私钥为 `root:root 0600`，证书和 CA 信任文件不得被低权限用户修改。CA 私钥应单独保管，不随服务证书分发。以下示例未覆盖完整身份用途、权限验收或全部失败处理，实际部署须按环境补充并验证。
 
 ```bash
 #!/bin/bash
@@ -276,13 +313,11 @@ openssl req -new -key server-key.pem -out server-req.pem \
 openssl x509 -req -days 365 -in server-req.pem -CA ca-cert.pem \
   -CAkey ca-key.pem -CAcreateserial -out server-cert.pem -extfile <(printf "subjectAltName=IP:ip1,IP:ip2,DNS:localhost")
 
-# 移动到安全位置
-mkdir -p  /etc/virtrust/certs/
-sudo mv ca-cert.pem server-cert.pem server-key.pem /etc/virtrust/certs/
+# 生成的文件留在当前私有工作目录，核验后再由管理员安排部署。
 ```
 
 ```
- 注意： 生成证书之后，再拷贝到其他服务器节点
+ 注意：只按节点身份分发所需证书和对应私钥，不批量复制 CA 私钥或共用同一节点私钥。
 ```
 
 ### libvirt证书
@@ -442,8 +477,13 @@ sudo firewall-cmd --reload
 
 ### 通信矩阵
 
+以下描述通信通道，不代表完成了真实握手或部署验收。5031 是本服务默认 TCP 端口；16514 是 libvirt TLS 通道的默认端口，实际端口及 TLS 参数以部署配置为准。本地 UDS 不经过 TCP 防火墙规则。
+
 | Source Device | Source IP      | Source Port                         | Destination Device | Destination IP      | Destination Port | Protocol | Is Listening Port Configurable | Authentication | Encryption  |
 | ------------- | -------------- | ----------------------------------- | ------------------ | ------------------- | ---------------- | -------- | ------------------------------ | -------------- | ----------- |
-| Source Node   | Source host IP | Random port allocated by the system | Destination Node   | Destination host IP | 5031             | TCP      | No                             | Certificate    | TLS 1.2/1.3 |
-| Source Node   | Source host IP | Random port allocated by the system | Destination Node   | Destination host IP | 16514            | TCP      | Yes                            | Certificate    | TLS 1.2/1.3 |
+| Source Node   | Source host IP | Random port allocated by the system | Destination Node   | Destination host IP | 5031（默认）     | TCP      | Yes（port）                    | 双向证书认证（TLS模式） | TLS（具体版本依赖底层配置） |
+| Source Node   | Source host IP | Random port allocated by the system | Destination Node   | Destination host IP | 16514（默认）    | TCP      | Yes（libvirt配置）             | 按libvirt TLS认证配置 | TLS（具体版本依赖底层配置） |
+| 本地root客户端 | 本机 | 不适用 | 本地libvirtrustd | 本机 | /run/virtrust/rpc.sock | UDS | No | 文件系统访问权限 | 无TLS |
+
+TCP 第一行描述双向 TLS 模式；若显式将三个证书路径全部置空，当前实现允许非 TLS TCP，此时没有表中的证书认证和加密能力。不要将该模式用于需要安全通信的部署。
 
