@@ -13,9 +13,10 @@ constexpr std::string_view LIBVIRTRUSTD_VERSION = "1.0.0";
 
 // 默认配置。
 constexpr std::string_view LIBVIRTRUSTD_SERVER_ADDR = "127.0.0.1";
-constexpr std::string_view LIBVIRTRUSTD_CA_PATH = "ca-cert.pem";
-constexpr std::string_view LIBVIRTRUSTD_CERT_PATH = "server-cert.pem";
-constexpr std::string_view LIBVIRTRUSTD_SK_PATH = "server-sk.pem";
+// 与 RPM 示例配置保持一致；缺省证书路径也必须满足读取函数的绝对路径约束。
+constexpr std::string_view LIBVIRTRUSTD_CA_PATH = "/etc/virtrust/certs/ca-cert.pem";
+constexpr std::string_view LIBVIRTRUSTD_CERT_PATH = "/etc/virtrust/certs/server-cert.pem";
+constexpr std::string_view LIBVIRTRUSTD_SK_PATH = "/etc/virtrust/certs/server-key.pem";
 // 生产端点固定在 root 专用目录；与本地 API 客户端保持一致，不接受配置覆盖。
 constexpr std::string_view LIBVIRTRUSTD_UDS_PATH = "/run/virtrust/rpc.sock";
 constexpr const char *VIRTRUSTD_LOGFILE_NAME = "/var/log/virtrustd.log";

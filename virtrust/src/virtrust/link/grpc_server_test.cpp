@@ -163,6 +163,7 @@ TEST_F(GrpcServerTest, SymlinkParentRejected)
     GrpcServer server(config);
     EXPECT_EQ(server.Start(), LinkRc::ERROR);
     EXPECT_NE(server.LastError().find("UDS parent"), std::string::npos);
+    EXPECT_NE(server.LastError().find("directory=[" + alias + "]"), std::string::npos);
     EXPECT_FALSE(std::filesystem::exists(directory + "/rpc.sock"));
 }
 
@@ -181,6 +182,7 @@ TEST_F(GrpcServerTest, WritableAncestorRejected)
     GrpcServer server(config);
     EXPECT_EQ(server.Start(), LinkRc::ERROR);
     EXPECT_NE(server.LastError().find("untrusted ancestor"), std::string::npos);
+    EXPECT_NE(server.LastError().find("directory=[" + directory + "]"), std::string::npos);
     ASSERT_EQ(chmod(directory.c_str(), 0700), 0);
 }
 
@@ -203,6 +205,7 @@ TEST_F(GrpcServerTest, ForeignParentOwnerRejected)
     GrpcServer server(config);
     EXPECT_EQ(server.Start(), LinkRc::ERROR);
     EXPECT_NE(server.LastError().find("owned by the effective UID"), std::string::npos);
+    EXPECT_NE(server.LastError().find("directory=[" + parent + "]"), std::string::npos);
 }
 
 // 运行后目录权限变化时先回收资源，拒绝本层 Socket lstat/unlink，并保留身份供修复后重试。
@@ -211,41 +214,80 @@ TEST_F(GrpcServerTest, UnsafeParentPreventsCleanupAndAllowsRetryAfterRepair)
 {
     int stats = 0;
     int unlinks = 0;
+    int missingPaths = 0;
     GrpcServer server(config);
     auto &ops = GrpcServerTestPeer::Ops(server);
     ops.stat = [&](const char *path, struct stat *info) {
         ++stats;
-        return lstat(path, info);
+        const int result = lstat(path, info);
+        if (result != 0 && errno == ENOENT) {
+            ++missingPaths;
+        }
+        return result;
     };
     ops.unlink = [&](const char *path) {
         ++unlinks;
         return unlink(path);
     };
     ASSERT_EQ(server.Start(), LinkRc::OK) << server.LastError();
+    struct stat original {};
+    ASSERT_EQ(lstat(config.udsPath.c_str(), &original), 0);
+    ASSERT_TRUE(S_ISSOCK(original.st_mode));
+    ASSERT_TRUE(GrpcServerTestPeer::HasIdentity(server));
+    ASSERT_EQ(GrpcServerTestPeer::SocketDevice(server), original.st_dev);
+    ASSERT_EQ(GrpcServerTestPeer::SocketInode(server), original.st_ino);
     // 回调在启动前安装，启动成功后重置计数，后续只观察停止阶段。
     stats = 0;
     unlinks = 0;
+    missingPaths = 0;
     ASSERT_EQ(chmod(directory.c_str(), 0755), 0);
     EXPECT_EQ(server.Stop(), StopResult::PathCleanupFailed);
     const auto error = server.LastError();
     EXPECT_NE(error.find("UDS cleanup refused"), std::string::npos);
     EXPECT_NE(error.find("mode 0700"), std::string::npos);
     EXPECT_NE(error.find(config.udsPath), std::string::npos);
-    EXPECT_FALSE(GrpcServerTestPeer::HasThreadObject(server));
-    EXPECT_FALSE(GrpcServerTestPeer::HasServer(server));
-    EXPECT_FALSE(GrpcServerTestPeer::HasService(server));
+    ASSERT_FALSE(GrpcServerTestPeer::HasThreadObject(server));
+    ASSERT_FALSE(GrpcServerTestPeer::HasServer(server));
+    ASSERT_FALSE(GrpcServerTestPeer::HasService(server));
     EXPECT_EQ(stats, 0);
     EXPECT_EQ(unlinks, 0);
     EXPECT_TRUE(GrpcServerTestPeer::HasIdentity(server));
+    EXPECT_EQ(GrpcServerTestPeer::SocketDevice(server), original.st_dev);
+    EXPECT_EQ(GrpcServerTestPeer::SocketInode(server), original.st_ino);
+    // 未修复权限再次停止，仍不能进入本层路径查询或删除，且不能改写原身份。
+    EXPECT_EQ(server.Stop(), StopResult::PathCleanupFailed);
+    EXPECT_EQ(stats, 0);
+    EXPECT_EQ(unlinks, 0);
+    EXPECT_EQ(missingPaths, 0);
+    EXPECT_TRUE(GrpcServerTestPeer::HasIdentity(server));
+    EXPECT_EQ(GrpcServerTestPeer::SocketDevice(server), original.st_dev);
+    EXPECT_EQ(GrpcServerTestPeer::SocketInode(server), original.st_ino);
     ASSERT_EQ(chmod(directory.c_str(), 0700), 0);
+    // 服务资源已释放；若第三方仍留下原 Socket，由夹具移除以确定性覆盖 ENOENT。
+    // 此删除不计入被测操作，也不证明本层 unlink 成功分支；替换对象绝不删除。
+    struct stat remaining {};
+    const int remainingResult = lstat(config.udsPath.c_str(), &remaining);
+    if (remainingResult == 0) {
+        ASSERT_TRUE(S_ISSOCK(remaining.st_mode));
+        ASSERT_EQ(remaining.st_dev, original.st_dev);
+        ASSERT_EQ(remaining.st_ino, original.st_ino);
+        ASSERT_EQ(unlink(config.udsPath.c_str()), 0);
+    } else {
+        ASSERT_EQ(errno, ENOENT);
+    }
     EXPECT_EQ(server.Stop(), StopResult::Stopped);
     EXPECT_FALSE(GrpcServerTestPeer::HasIdentity(server));
     EXPECT_EQ(stats, 1);
-    // 第三方可能已移除路径，因此允许 ENOENT 成功，不强制本层必须调用 unlink。
-    EXPECT_LE(unlinks, 1);
+    EXPECT_EQ(missingPaths, 1);
+    EXPECT_EQ(unlinks, 0);
     struct stat info {};
     ASSERT_EQ(lstat(config.udsPath.c_str(), &info), -1);
     EXPECT_EQ(errno, ENOENT);
+    // 身份已清除，重复停止不能再次查询或删除路径。
+    EXPECT_EQ(server.Stop(), StopResult::Stopped);
+    EXPECT_EQ(stats, 1);
+    EXPECT_EQ(missingPaths, 1);
+    EXPECT_EQ(unlinks, 0);
 }
 
 TEST_F(GrpcServerTest, ExistingRegularFileIsNeverDeleted)

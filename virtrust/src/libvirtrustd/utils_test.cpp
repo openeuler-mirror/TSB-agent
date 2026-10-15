@@ -149,6 +149,9 @@ TEST_F(UtilsTest, MissingKeysUseDefaultValues)
     EXPECT_EQ(config->caPath, std::string(LIBVIRTRUSTD_CA_PATH));
     EXPECT_EQ(config->certPath, std::string(LIBVIRTRUSTD_CERT_PATH));
     EXPECT_EQ(config->skPath, std::string(LIBVIRTRUSTD_SK_PATH));
+    EXPECT_EQ(config->caPath, "/etc/virtrust/certs/ca-cert.pem");
+    EXPECT_EQ(config->certPath, "/etc/virtrust/certs/server-cert.pem");
+    EXPECT_EQ(config->skPath, "/etc/virtrust/certs/server-key.pem");
     EXPECT_EQ(config->ip, std::string(LIBVIRTRUSTD_SERVER_ADDR));
     EXPECT_EQ(config->udsPath, std::string(LIBVIRTRUSTD_UDS_PATH));
     EXPECT_EQ(config->udsPath, "/run/virtrust/rpc.sock");

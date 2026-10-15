@@ -58,5 +58,14 @@ public:
     {
         return server.socketIdentityRecorded_;
     }
+    // 仅在启停完成后观察已记录的原始身份，不改变被测对象状态。
+    static dev_t SocketDevice(const GrpcServer &server)
+    {
+        return server.socketDevice_;
+    }
+    static ino_t SocketInode(const GrpcServer &server)
+    {
+        return server.socketInode_;
+    }
 };
 } // 命名空间 virtrust

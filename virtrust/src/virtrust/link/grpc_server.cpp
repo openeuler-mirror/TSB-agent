@@ -53,8 +53,11 @@ private:
 // 底层服务允许测试使用当前用户的独立 0700 目录；不改变生产 root-only 策略。
 std::string CheckUdsParent(const std::string &socketPath)
 {
-    const auto fail = [&](const char *reason, int error = 0) {
+    const auto fail = [&](const char *reason, int error = 0, const std::string &directoryPath = {}) {
         auto text = std::string("UDS parent check failed [") + socketPath + "]: " + reason;
+        if (!directoryPath.empty()) {
+            text += "; directory=[" + directoryPath + "]";
+        }
         if (error != 0) {
             text += "; errno=" + std::to_string(error) + " " + strerror(error);
         }
@@ -70,30 +73,33 @@ std::string CheckUdsParent(const std::string &socketPath)
         return fail("cannot open root directory", errno);
     }
     const auto relative = path.parent_path().relative_path();
+    std::filesystem::path checked("/");
     for (auto it = relative.begin(); it != relative.end(); ++it) {
         const auto part = it->string();
+        checked /= part;
         if (part.empty() || part == "." || part == "..") {
-            return fail("dot or empty directory components are prohibited");
+            return fail("dot or empty directory components are prohibited", 0, checked.string());
         }
         const int fd = openat(directory.Get(), part.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
         if (fd < 0) {
-            return fail("cannot open directory; symbolic links are prohibited", errno);
+            return fail("cannot open directory; symbolic links are prohibited", errno, checked.string());
         }
         directory.Reset(fd);
         struct stat info {};
         if (fstat(directory.Get(), &info) != 0) {
-            return fail("cannot read directory attributes", errno);
+            return fail("cannot read directory attributes", errno, checked.string());
         }
         if (std::next(it) == relative.end()) {
             if (info.st_uid != geteuid() || (info.st_mode & 07777) != 0700) {
-                return fail("dedicated directory must be owned by the effective UID with mode 0700");
+                return fail("dedicated directory must be owned by the effective UID with mode 0700", 0,
+                            checked.string());
             }
         } else {
             // 与实例目录策略一致：为隔离测试保留 root 粘滞祖先目录例外，生产 /run 不依赖它。
             // 此分支也存在于生产构建中，并非测试专用开关或 /tmp 路径白名单。
             const bool stickyRoot = info.st_uid == 0 && (info.st_mode & S_ISVTX) != 0;
             if ((info.st_uid != 0 && info.st_uid != geteuid()) || ((info.st_mode & 0022) != 0 && !stickyRoot)) {
-                return fail("untrusted ancestor owner or write permissions");
+                return fail("untrusted ancestor owner or write permissions", 0, checked.string());
             }
         }
     }

@@ -4,9 +4,67 @@
 
 #include "gtest/gtest.h"
 
+#include <sys/wait.h>
+
+#include <cerrno>
+#include <csignal>
+#include <cstdlib>
+#include <filesystem>
+
 #include "virtrust/base/str_utils.h"
 
 namespace virtrust {
+
+// 相对路径必须在尝试打开文件前被拒绝，否则打开 FIFO 会阻塞调用线程。
+TEST(StrUtils, RejectsRelativeFifoBeforeOpening)
+{
+    char path[] = "/tmp/virtrust-readfile-fifo.XXXXXX";
+    const int temporary = mkstemp(path);
+    ASSERT_GE(temporary, 0);
+    ASSERT_EQ(close(temporary), 0);
+    ASSERT_EQ(unlink(path), 0);
+    ASSERT_EQ(mkfifo(path, 0600), 0);
+
+    const auto relative = std::filesystem::path(path).lexically_relative(std::filesystem::current_path());
+    if (relative.empty() || relative.is_absolute()) {
+        unlink(path);
+        FAIL() << "Failed to derive a relative FIFO path";
+    }
+    const pid_t child = fork();
+    if (child == 0) {
+        alarm(2);
+        _exit(ReadFile(relative.string()).empty() ? 0 : 1);
+    }
+    const int forkError = errno;
+    int status = 0;
+    const pid_t waited = child < 0 ? -1 : waitpid(child, &status, 0);
+    const int waitError = errno;
+    const int removeResult = unlink(path);
+    ASSERT_GE(child, 0) << "fork failed: " << forkError;
+    ASSERT_EQ(waited, child) << "waitpid failed: " << waitError;
+    ASSERT_EQ(removeResult, 0);
+    ASSERT_TRUE(WIFEXITED(status)) << "ReadFile blocked before validating the relative path";
+    EXPECT_EQ(WEXITSTATUS(status), 0);
+}
+
+// 调整校验顺序后，仍应读取有效绝对路径中的普通文件。
+TEST(StrUtils, ReadsAbsoluteRegularFile)
+{
+    char path[] = "/tmp/virtrust-readfile-regular.XXXXXX";
+    const int file = mkstemp(path);
+    ASSERT_GE(file, 0);
+    constexpr char content[] = "certificate-content";
+    const ssize_t written = write(file, content, sizeof(content) - 1);
+    const int closeResult = close(file);
+    if (written != static_cast<ssize_t>(sizeof(content) - 1) || closeResult != 0) {
+        unlink(path);
+        FAIL() << "Failed to prepare regular file fixture";
+    }
+    const auto actual = ReadFile(path);
+    const int removeResult = unlink(path);
+    ASSERT_EQ(removeResult, 0);
+    EXPECT_EQ(actual, content);
+}
 
 TEST(StrUtils, MakeString)
 {
