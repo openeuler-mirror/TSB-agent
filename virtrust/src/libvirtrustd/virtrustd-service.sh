@@ -5,10 +5,10 @@
 #
 # 功能：安装、卸载、启动、停止、重启、查看 libvirtrustd 服务
 #
-# 用法: ./virtrustd-service.sh {install|uninstall|start|stop|restart|status|logs|enable|disable}
+# 用法: ./virtrustd-service.sh {install|uninstall|start|stop|restart|reload|status|logs|enable|disable|help}
 #
 # 示例:
-#   ./virtrustd-service.sh install    # 安装并启用服务
+#   ./virtrustd-service.sh install    # 仅在非 RPM 部署中安装服务单元，不自动启用或启动
 #   ./virtrustd-service.sh start      # 启动服务
 #   ./virtrustd-service.sh status     # 查看状态
 #   ./virtrustd-service.sh restart    # 重启服务
@@ -17,7 +17,6 @@
 # ============================================================
 
 # set -e: 任何命令失败（返回非0）时立即退出脚本
-# set -e: Exit immediately if a command fails
 set -e
 
 # ============================================================
@@ -27,9 +26,18 @@ set -e
 # 服务名称（与 systemd service 文件中的名称一致）
 SERVICE_NAME="libvirtrustd"
 
-# systemd service 文件路径
-# /etc/systemd/system/ 是用户自定义 service 的标准位置
-SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+# 脚本与 RPM 使用相同的系统服务单元目标。
+SERVICE_FILE="/usr/lib/systemd/system/${SERVICE_NAME}.service"
+
+# 从脚本所在目录读取唯一的服务单元模板，不依赖当前工作目录。
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+UNIT_TEMPLATE="${SCRIPT_DIR}/${SERVICE_NAME}.service"
+
+# 旧版脚本创建的高优先级单元只由管理员人工迁移。
+LEGACY_SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+
+# 标识脚本安装的单元，防止卸载来源不明的文件。
+SCRIPT_UNIT_MARKER="# virtrustd-service.sh 管理的服务单元"
 
 # 可执行文件路径
 BINARY_PATH="/usr/bin/${SERVICE_NAME}"
@@ -39,9 +47,6 @@ SHARED_LIB_PATH="/usr/lib64/libvirtrust-shared.so"
 
 # 配置文件目录
 CONFIG_DIR="/etc/virtrust/config.json"
-
-# 运行时数据目录（PID文件、socket等）
-DATA_DIR="/var/run/virtrust"
 
 # ============================================================
 # 颜色定义（用于终端输出美观）
@@ -92,6 +97,86 @@ check_root() {
     fi
 }
 
+# 在修改服务前确认 RPM 数据库可查询，且 TSB-agent 包未安装。
+check_rpm_unit_ownership() {
+    if ! command -v rpm >/dev/null 2>&1; then
+        log_error "Cannot determine service unit ownership: rpm is unavailable." >&2
+        return 1
+    fi
+
+    local package_names=""
+    if ! package_names=$(rpm -qa --qf '%{NAME}\n'); then
+        log_error "Cannot determine service unit ownership: RPM package query failed." >&2
+        return 1
+    fi
+    if [[ $'\n'"${package_names}"$'\n' == *$'\nTSB-agent\n'* ]]; then
+        log_error "Service unit is managed by RPM package TSB-agent; use RPM to update or remove it." >&2
+        return 1
+    fi
+
+    # 从 RPM 文件清单查询所有者；即使目标文件已被手工删除也不能由脚本接管。
+    local -a query_status=()
+    if rpm -qa --qf '[%{FILENAMES}\n]' | grep -F -x -- "$SERVICE_FILE" >/dev/null; then
+        log_error "Service unit path is owned by an RPM package; use RPM to update or remove it." >&2
+        return 1
+    else
+        query_status=("${PIPESTATUS[@]}")
+        if [[ ${query_status[0]} -ne 0 || ${query_status[1]} -ne 1 ]]; then
+            log_error "Cannot determine service unit ownership: RPM file query failed." >&2
+            return 1
+        fi
+    fi
+    return 0
+}
+
+# 旧 /etc 单元会覆盖 /usr/lib 单元，不能在其存在时报告安装成功或执行卸载。
+check_legacy_unit_absent() {
+    if [[ -e "$LEGACY_SERVICE_FILE" || -L "$LEGACY_SERVICE_FILE" ]]; then
+        log_error "A legacy service unit exists: ${LEGACY_SERVICE_FILE}; inspect and migrate it manually." >&2
+        return 1
+    fi
+}
+
+# 只接管带脚本标记的普通文件；无标记文件可能由管理员管理。
+check_script_managed_unit() {
+    if [[ -L "$SERVICE_FILE" || ! -f "$SERVICE_FILE" ]]; then
+        log_error "Service unit is not a script-managed regular file: ${SERVICE_FILE}" >&2
+        return 1
+    fi
+    local first_line=""
+    if ! IFS= read -r first_line < "$SERVICE_FILE" || [[ "$first_line" != "$SCRIPT_UNIT_MARKER" ]]; then
+        log_error "Service unit is not script-managed: ${SERVICE_FILE}" >&2
+        return 1
+    fi
+}
+
+# 安装只可新建目标或替换已有的脚本单元；调用者需先核验 RPM 所有权。
+check_install_unit_target() {
+    if [[ -L "$SERVICE_FILE" || ( -e "$SERVICE_FILE" && ! -f "$SERVICE_FILE" ) ]]; then
+        log_error "Installation aborted: service unit path must be a regular file or absent: ${SERVICE_FILE}" >&2
+        return 1
+    fi
+    if [[ -f "$SERVICE_FILE" ]]; then
+        check_script_managed_unit || return 1
+    fi
+}
+
+# 有状态命令按单元名作用于当前生效的配置，必须确认它就是脚本将要管理的目标。
+# 空路径仅允许首次安装；查询失败或其他目录中的同名单元均由管理员人工处理。
+check_effective_unit_source() {
+    local fragment=""
+    if ! fragment=$(systemctl show "${SERVICE_NAME}" -p FragmentPath --value); then
+        log_error "Cannot determine effective service unit: systemctl show failed." >&2
+        return 1
+    fi
+    if [[ -f "$SERVICE_FILE" && "$fragment" == "$SERVICE_FILE" ]] ||
+       [[ ! -f "$SERVICE_FILE" && -z "$fragment" ]]; then
+        return 0
+    fi
+    log_error "Effective service unit differs from the script-managed target (effective: ${fragment:-<none>}; target: ${SERVICE_FILE}). Inspect it manually." >&2
+    return 1
+}
+
 # 检查可执行文件是否存在
 # 在启动/重启服务前必须确认文件已安装
 check_pre_installation() {
@@ -117,82 +202,95 @@ check_pre_installation() {
 
 # ============================================================
 # 服务安装函数
-# 功能：创建服务所需的目录和 systemd unit 文件
+# 功能：创建 systemd unit 文件
 # ============================================================
-install_service() {
+# 使用子 Shell 限定退出清理的作用域，避免覆盖调用者的 trap。
+install_service() (
     log_info "Installing ${SERVICE_NAME} systemd service..."
 
     # 必须以 root 权限运行
     check_root
+    check_rpm_unit_ownership || return 1
+    check_legacy_unit_absent || return 1
 
-    # 创建服务所需的目录结构
-    mkdir -p ${DATA_DIR}     # 运行时数据目录
+    # /run/virtrust 由守护进程启动时创建并校验，避免这里受 umask 影响创建不合规目录。
+    # 已有目录不自动修改权限；属主或权限不符合要求时，由管理员核验处理。
 
-    # 如果 service 文件已存在，先停止现有服务
-    if [[ -f "${SERVICE_FILE}" ]]; then
-        log_warn "Service file already exists, overwriting..."
-        # 2>/dev/null: 抑制错误输出（如果服务未运行会有错误）
-        # || true: 即使前面的命令失败也让脚本继续执行
-        systemctl stop ${SERVICE_NAME} 2>/dev/null || true
+    # 不自动覆盖链接、目录或来源不明的单元；管理员须先核验其用途。
+    check_install_unit_target || return 1
+    check_effective_unit_source || return 1
+    if [[ -L "$UNIT_TEMPLATE" || ! -f "$UNIT_TEMPLATE" ]]; then
+        log_error "Installation aborted: service unit template must be a regular file: ${UNIT_TEMPLATE}" >&2
+        return 1
     fi
 
-    # 使用 heredoc 创建 service 文件
-    # 'EOF' 使用单引号可以防止变量被 bash 展开
-    cat > ${SERVICE_FILE} << 'EOF'
-[Unit]
-Description=Virtrust Daemon Service
-Documentation=https://gitee.com/openeuler/TSB-agent/virtrust/docs/004-virtrustd.md
-After=network.target libvirtd.service
-Wants=libvirtd.service
+    # 同目录暂存使最终重命名位于同一文件系统，写入失败不会截断原单元。
+    local unit_tmp=""
+    local prepare_result=0
+    unit_tmp=$(mktemp "${SERVICE_FILE}.tmp.XXXXXX") || prepare_result=$?
+    if [[ $prepare_result -ne 0 ]]; then
+        log_error "Installation aborted: failed to create a temporary service unit (exit code ${prepare_result})." >&2
+        return "$prepare_result"
+    fi
+    # 正常退出或已捕获失败时清理暂存文件；SIGKILL、断电无法由退出钩子处理。
+    trap 'if [[ -n "$unit_tmp" ]]; then rm -f -- "$unit_tmp" || log_warn "Failed to remove temporary service unit: $unit_tmp" >&2; fi' EXIT
 
-[Service]
-Type=simple
-User=root
-Group=root
-ExecStart=/usr/bin/libvirtrustd --config /etc/virtrust/config.json
-Restart=on-failure
-ExecReload=/bin/kill -HUP $MAINPID
-ExecStop=/bin/kill -SIGTERM $MAINPID
-RestartSec=5s
-TimeoutStartSec=30
-TimeoutStopSec=30
-#ReadWritePaths=/etc/virtrust /var/log/virtrust /var/run
-ProtectSystem=false
-ProtectHome=false
-PrivateTmp=false
-LimitNOFILE=65536
-LimitNPROC=4096
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=libvirtrustd
-NoNewPrivileges=true
-Environment="TSB_AGENT_SO_MODE=mock"
-Environment="LOG_LEVEL=info"
+    # 先写入来源标记和唯一模板，准备成功后才停止已有服务。
+    { printf '%s\n' "$SCRIPT_UNIT_MARKER" && cat -- "$UNIT_TEMPLATE"; } > "$unit_tmp" || prepare_result=$?
+    if [[ $prepare_result -ne 0 ]]; then
+        log_error "Installation aborted: failed to write the temporary service unit (exit code ${prepare_result}); the service unit was not replaced." >&2
+        return "$prepare_result"
+    fi
 
-[Install]
-WantedBy=multi-user.target
-EOF
+    # 644: root 可读写，其他人可读；权限准备失败时保留原单元。
+    chmod 644 "$unit_tmp" || prepare_result=$?
+    if [[ $prepare_result -ne 0 ]]; then
+        log_error "Installation aborted: failed to set temporary service unit permissions (exit code ${prepare_result})." >&2
+        return "$prepare_result"
+    fi
 
-    # 设置 service 文件权限
-    # 644: root 可读写，其他人可读（符合 systemd 要求）
-    chmod 644 ${SERVICE_FILE}
+    if [[ -f "${SERVICE_FILE}" ]]; then
+        log_warn "Service file already exists; stopping the service before replacement..."
+        local stop_result=0
+        systemctl stop "${SERVICE_NAME}" || stop_result=$?
+        if [[ $stop_result -ne 0 ]]; then
+            log_error "Installation aborted: failed to stop ${SERVICE_NAME} (exit code ${stop_result}); the service unit was not replaced." >&2
+            return "$stop_result"
+        fi
+    fi
 
-    # 通知 systemd 重新加载单元文件
-    # 在添加、修改、删除 service 文件后必须执行
-    systemctl daemon-reload
+    # stop 期间目标或 RPM 数据库可能变化；发布前重新核验以缩短竞态窗口。
+    if ! check_rpm_unit_ownership || ! check_legacy_unit_absent ||
+       ! check_install_unit_target || ! check_effective_unit_source; then
+        log_error "Installation aborted: service unit ownership or target changed before replacement; check the service state." >&2
+        return 1
+    fi
 
-    # daemon-reexec 会重新执行 systemd 主进程
-    # 用于应用某些需要 systemd 本身重启才能生效的配置
-    systemctl daemon-reexec
+    # 以完整文件替换目标；该步骤不保证断电持久性或整个安装流程的原子性。
+    local replace_result=0
+    mv -T -- "$unit_tmp" "$SERVICE_FILE" || replace_result=$?
+    if [[ $replace_result -ne 0 ]]; then
+        log_error "Installation aborted: failed to replace the service unit (exit code ${replace_result}); check the service state before retrying." >&2
+        return "$replace_result"
+    fi
+    unit_tmp=""
 
-    # 启用服务（创建符号链接实现开机自启）
-    # 这不会启动服务，只是注册为开机启动
+    # 文件已发布后，加载失败不能再声称原单元未改变，也不自动启动服务。
+    local reload_result=0
+    systemctl daemon-reload || reload_result=$?
+    if [[ $reload_result -ne 0 ]]; then
+        log_error "Service unit was updated, but daemon-reload failed (exit code ${reload_result}); check the installed unit and service state." >&2
+        return "$reload_result"
+    fi
+
+    # 安装时不自动启用开机自启；需要时由管理员显式执行 enable。
+    # enable 只注册开机自启，不会立即启动服务。
     #systemctl enable ${SERVICE_NAME}
 
     log_success "Service installed successfully"
     log_info "Use 'systemctl start ${SERVICE_NAME}' to start the service"
     log_info "Or use: $0 start"
-}
+)
 
 # ============================================================
 # 服务卸载函数
@@ -202,27 +300,58 @@ uninstall_service() {
     log_info "Uninstalling ${SERVICE_NAME} systemd service..."
 
     check_root
+    check_rpm_unit_ownership || return 1
+    check_legacy_unit_absent || return 1
+    check_script_managed_unit || return 1
+    check_effective_unit_source || return 1
 
-    # 检查服务是否正在运行，如果运行则停止
-    # is-active --quiet: 只返回退出码，不输出信息
-    if systemctl is-active --quiet ${SERVICE_NAME}; then
-        log_info "Stopping service..."
-        systemctl stop ${SERVICE_NAME}
+    # 直接以停止命令的结果为准，避免把状态查询失败当成无需停止。
+    local stop_result=0
+    log_info "Stopping service..."
+    systemctl stop "${SERVICE_NAME}" || stop_result=$?
+    if [[ $stop_result -ne 0 ]]; then
+        log_error "Uninstallation aborted: failed to stop ${SERVICE_NAME} (exit code ${stop_result}); the service unit file was not removed." >&2
+        return "$stop_result"
     fi
 
-    # 检查服务是否已启用（开机自启）
-    # 如果是则取消启用
-    if systemctl is-enabled --quiet ${SERVICE_NAME}; then
-        log_info "Disabling service..."
-        systemctl disable ${SERVICE_NAME}
+    # stop 后若另一个管理者接管单元，不再继续禁用服务。
+    if ! check_rpm_unit_ownership || ! check_legacy_unit_absent ||
+       ! check_script_managed_unit || ! check_effective_unit_source; then
+        log_error "Uninstallation aborted: service unit ownership or target changed after stop; check the service state." >&2
+        return 1
     fi
 
-    # 删除 service 文件
-    rm -f ${SERVICE_FILE}
+    # 停止成功后再禁用；失败时保留单元，已执行的停止动作不自动回滚。
+    local disable_result=0
+    log_info "Disabling service..."
+    systemctl disable "${SERVICE_NAME}" || disable_result=$?
+    if [[ $disable_result -ne 0 ]]; then
+        log_error "Uninstallation aborted: failed to disable ${SERVICE_NAME} (exit code ${disable_result}); the service unit file was not removed. Check the service state." >&2
+        return "$disable_result"
+    fi
 
-    # 重新加载 systemd 配置
-    systemctl daemon-reload
-    systemctl daemon-reexec
+    # disable 期间也可能发生替换；删除前再核验一次。
+    if ! check_rpm_unit_ownership || ! check_legacy_unit_absent ||
+       ! check_script_managed_unit || ! check_effective_unit_source; then
+        log_error "Uninstallation aborted: service unit ownership or target changed before removal; check the service state." >&2
+        return 1
+    fi
+
+    # 只删除脚本管理的单元路径；保留删除失败的原始诊断和返回码。
+    local remove_result=0
+    rm -f -- "${SERVICE_FILE}" || remove_result=$?
+    if [[ $remove_result -ne 0 ]]; then
+        log_error "Uninstallation aborted: failed to remove service unit file ${SERVICE_FILE} (exit code ${remove_result}). Check the file and service state." >&2
+        return "$remove_result"
+    fi
+
+    # 文件已经删除，重载失败时明确告知实际阶段，不声称卸载已全部完成。
+    local reload_result=0
+    systemctl daemon-reload || reload_result=$?
+    if [[ $reload_result -ne 0 ]]; then
+        log_error "Service unit file was removed, but daemon-reload failed (exit code ${reload_result}); check the effective unit and service state." >&2
+        return "$reload_result"
+    fi
 
     log_success "Service uninstalled successfully"
 }
@@ -234,7 +363,7 @@ start_service() {
     log_info "Starting ${SERVICE_NAME}..."
     check_pre_installation
     systemctl start ${SERVICE_NAME}
-    sleep 1  # 等待1秒让服务完全启动
+    sleep 1  # 延迟后查看状态，不保证服务已完成初始化或可以处理请求。
     status_service  # 显示启动后的状态
 }
 
@@ -255,19 +384,17 @@ restart_service() {
     log_info "Restarting ${SERVICE_NAME}..."
     check_pre_installation
     systemctl restart ${SERVICE_NAME}
-    sleep 1  # 等待1秒让服务完全启动
+    sleep 1  # 延迟后查看状态，不保证服务已完成初始化或可以处理请求。
     status_service  # 显示重启后的状态
 }
 
 # ============================================================
-# 配置重载函数
-# 发送 SIGHUP 信号让进程优雅重启（重新读取配置文件）
-# 与 restart 的区别：restart 会完全停止再启动，reload 只重载配置
+# 拒绝未实现的配置重载，不发送信号或自动重启服务。
+# 修改配置后，须先确认无在途业务，再由管理员执行受控重启。
 # ============================================================
 reload_service() {
-    log_info "Reloading ${SERVICE_NAME} configuration..."
-    systemctl reload ${SERVICE_NAME}
-    log_success "Configuration reloaded"
+    log_error "Configuration reload is not supported. Confirm there are no in-flight operations before a controlled restart." >&2
+    return 1
 }
 
 # ============================================================
@@ -285,14 +412,16 @@ status_service() {
     if systemctl is-active --quiet ${SERVICE_NAME}; then
         echo -e "Status: ${COLOR_GREEN}running${COLOR_NC}"
     else
-        echo -e "Status: ${COLOR_RED}stopped${COLOR_NC}"
+        echo -e "Status: ${COLOR_RED}inactive or status query failed${COLOR_NC}"
     fi
 
     echo ""
 
     # 显示 systemd 提供的详细状态信息
     # --no-pager: 不使用分页器，直接输出所有内容
-    systemctl status ${SERVICE_NAME} --no-pager
+    # 保存主查询结果；非零状态不应阻止后续诊断，也不能被辅助命令覆盖。
+    local status_result=0
+    systemctl status ${SERVICE_NAME} --no-pager || status_result=$?
 
     echo ""
     echo "----------------------------------------------"
@@ -302,10 +431,17 @@ status_service() {
 
     # 获取主进程 PID
     # systemctl show 返回属性值，-p 指定属性名，--value 只返回值
-    local pid=$(systemctl show ${SERVICE_NAME} -p MainPID --value 2>/dev/null || echo "0")
+    local pid=""
+    local pid_query_ok=1
+    if ! pid=$(systemctl show ${SERVICE_NAME} -p MainPID --value); then
+        pid_query_ok=0
+        log_warn "Failed to query the main process ID" >&2
+    fi
 
-    # 检查 PID 是否有效（非0、非空）
-    if [[ "${pid}" != "0" && -n "${pid}" ]]; then
+    # 区分查询失败、有效非零数字 PID、零值及异常输出。
+    if [[ $pid_query_ok -eq 0 ]]; then
+        echo "PID: unavailable (query failed)"
+    elif [[ "${pid}" =~ ^[0-9]+$ && "${pid}" != "0" ]]; then
         echo "PID: ${pid}"
         echo ""
 
@@ -316,7 +452,11 @@ status_service() {
         # - etime: 进程运行时间
         # - vsz: 虚拟内存大小（KB）
         # - rss: 实际物理内存大小（KB）
-        ps -p ${pid} -o pid,ppid,cmd,etime,vsz,rss --no-headers 2>/dev/null || true
+        ps -p "${pid}" -o pid,ppid,cmd,etime,vsz,rss --no-headers || \
+            log_warn "Failed to read process information; the process may have exited" >&2
+    elif [[ "${pid}" != "0" ]]; then
+        echo "PID: unavailable (unexpected query output)"
+        log_warn "Main process ID query returned an invalid value" >&2
     else
         echo "PID: N/A (process not running)"
     fi
@@ -331,10 +471,12 @@ status_service() {
     # -u: 按单元（服务）过滤
     # -n: 显示最近N行
     # --no-pager: 不分页
-    journalctl -u ${SERVICE_NAME} -n 10 --no-pager 2>/dev/null || echo "No logs available"
+    journalctl -u ${SERVICE_NAME} -n 10 --no-pager || \
+        log_warn "Failed to query recent logs" >&2
 
     echo ""
     echo "=============================================="
+    return "$status_result"
 }
 
 # ============================================================
@@ -342,8 +484,12 @@ status_service() {
 # 实时显示服务日志（类似 tail -f）
 # ============================================================
 show_logs() {
-    # $1 是第一个参数（行数），默认为 50
-    local lines=${1:-50}
+    # 缺省读取 50 行；显式传入的值必须是单个正十进制整数。
+    local lines=${1-50}
+    if [[ ! "$lines" =~ ^[1-9][0-9]*$ ]]; then
+        log_error "Invalid log line count: expected a positive decimal integer." >&2
+        return 1
+    fi
 
     echo ""
     echo "----------------------------------------------"
@@ -355,7 +501,7 @@ show_logs() {
     # -f: 实时跟踪（follow）新日志
     # -n: 显示最近N行
     # --no-pager: 不分页
-    journalctl -u ${SERVICE_NAME} -n ${lines} --no-pager -f
+    journalctl -u "${SERVICE_NAME}" -n "${lines}" --no-pager -f
 }
 
 # ============================================================
@@ -368,20 +514,20 @@ virtrustd-service.sh - ${SERVICE_NAME} systemd management script
 Usage: $0 <command>
 
 Commands:
-    install      Install and enable the service (start on boot)
-    uninstall    Stop service, disable, and remove service file
+    install      Install a non-RPM service unit without enabling or starting it
+    uninstall    Stop, disable, and remove only a script-managed service unit
     start        Start the service
     stop         Stop the service
     restart      Stop then start the service
-    reload       Send SIGHUP to reload configuration (graceful)
+    reload       Unsupported; returns an error without changing the service
     status       Show service status, process info, and recent logs
-    logs [n]     Show and follow last n lines of logs (default: 50)
+    logs [n]     Follow logs; n is one positive decimal integer (default: 50)
     enable       Enable service to start on boot
     disable      Disable service from starting on boot
     help         Show this help message
 
 Examples:
-    # Install and enable service
+    # Install only when the service unit is not managed by RPM
     sudo $0 install
 
     # Start the service
@@ -453,7 +599,7 @@ case "$1" in
     restart)
         restart_service
         ;;
-    # 重载配置
+    # 拒绝不受支持的配置重载
     reload)
         reload_service
         ;;
@@ -463,7 +609,11 @@ case "$1" in
         ;;
     # 查看日志
     logs)
-        show_logs ${2:-50}
+        if [[ $# -gt 2 ]]; then
+            log_error "Invalid log line count: expected a single positive decimal integer." >&2
+            exit 1
+        fi
+        show_logs "${2-50}"
         ;;
     # 启用开机自启
     enable)

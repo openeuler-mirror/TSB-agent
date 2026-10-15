@@ -145,6 +145,8 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY
 include(AddVirtrustTestIf)
 
 if(BUILD_TEST)
+  # 生成端和测试读取端共享构建目录，避免配置过程改写源码中的证书。
+  set(VIRTRUST_TEST_CERT_DIR "${PROJECT_BINARY_DIR}/test/certs")
   include(CTest)
   enable_testing()
   list(APPEND CMAKE_CTEST_ARGUMENTS "--output-on-failure")

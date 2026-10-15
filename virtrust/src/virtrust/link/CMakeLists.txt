@@ -35,7 +35,7 @@ if(BUILD_TEST)
   # 测试直接调用 gRPC 头文件接口，须显式链接其内联实现使用的底层库。
   target_link_libraries(grpc_server_fault_test PRIVATE grpc++ grpc gpr)
   target_compile_definitions(grpc_server_test PRIVATE
-    VIRTRUST_TEST_CERT_DIR="${PROJECT_SOURCE_DIR}/test")
+    VIRTRUST_TEST_CERT_DIR="${VIRTRUST_TEST_CERT_DIR}")
 endif()
 # add_virtrust_test_if(migration_session_test ${BUILD_TEST}) if(BUILD_TEST)
 # target_link_libraries(migration_session_test PRIVATE virtrust_proto) endif()
