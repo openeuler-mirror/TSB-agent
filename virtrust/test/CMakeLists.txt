@@ -1,74 +1,54 @@
 # Copyright (c)
 
-find_program(OPENSSL_EXECUTABLE openssl)
+# 服务管理脚本使用 Bash；缺少解释器时明确失败，避免漏跑回归测试。
+find_program(VIRTRUST_TEST_BASH_EXECUTABLE NAMES bash REQUIRED)
+foreach(service_test IN ITEMS install install_atomic uninstall status reload logs unit_update ownership effective_unit)
+  set(service_test_name "virtrustd_service_${service_test}_test")
+  add_test(
+    NAME ${service_test_name}
+    COMMAND "${VIRTRUST_TEST_BASH_EXECUTABLE}"
+            "${CMAKE_CURRENT_LIST_DIR}/${service_test_name}.sh")
+  # 测试仅使用临时文件和替代命令；超时用于防止测试进程意外挂起。
+  set_tests_properties(${service_test_name} PROPERTIES TIMEOUT 15)
+endforeach()
 
-if(OPENSSL_EXECUTABLE)
-  message(STATUS "Openssl executable found at: ${OPENSSL_EXECUTABLE}")
-  message(
-    STATUS "Generate test certificates at: ${CMAKE_CURRENT_LIST_DIR}/cert")
+find_program(OPENSSL_EXECUTABLE NAMES openssl REQUIRED)
 
-  # create ca sk and root cert
+# 逐步检查生成结果；前序失败立即结束配置，避免使用不完整或旧的测试凭据。
+function(virtrust_generate_test_certificate stage working_directory)
   execute_process(
-    COMMAND
-      ${OPENSSL_EXECUTABLE} req -x509 -newkey rsa:2048 -nodes -keyout sk.pem
-      -out cert.pem -days 365 -subj
-      "/C=US/ST=State/L=City/O=Organization/OU=Unit/CN=example.com" -nodes
-    WORKING_DIRECTORY ${CMAKE_CURRENT_LIST_DIR}/ca
+    COMMAND "${OPENSSL_EXECUTABLE}" ${ARGN}
+    WORKING_DIRECTORY "${working_directory}"
+    RESULT_VARIABLE certificate_result
+    ERROR_VARIABLE certificate_error
     OUTPUT_QUIET)
+  if(NOT "${certificate_result}" STREQUAL "0")
+    message(FATAL_ERROR
+      "Test certificate generation failed: stage=${stage}; directory=${working_directory}; result=${certificate_result}\n${certificate_error}")
+  endif()
+endfunction()
 
-  # -----------------
-  # server
-  # -----------------
+file(MAKE_DIRECTORY "${VIRTRUST_TEST_CERT_DIR}/ca"
+                    "${VIRTRUST_TEST_CERT_DIR}/server"
+                    "${VIRTRUST_TEST_CERT_DIR}/client")
+message(STATUS "Generating test certificates at: ${VIRTRUST_TEST_CERT_DIR}")
 
-  # create server's sk
-  execute_process(
-    COMMAND ${OPENSSL_EXECUTABLE} genrsa -out sk.pem 2048
-    WORKING_DIRECTORY ${CMAKE_CURRENT_LIST_DIR}/server
-    OUTPUT_QUIET)
+# 仅生成测试用 CA 和无口令私钥，生产证书仍由部署者提供。
+virtrust_generate_test_certificate("CA certificate" "${VIRTRUST_TEST_CERT_DIR}/ca"
+  req -x509 -newkey rsa:2048 -nodes -keyout sk.pem -out cert.pem -days 365
+  -subj "/C=US/ST=State/L=City/O=Organization/OU=Unit/CN=example.com")
 
-  # create csr for server
-  execute_process(
-    COMMAND ${OPENSSL_EXECUTABLE} req -new -key sk.pem -out server.csr -subj
-            "/C=US/ST=State/L=City/O=Organization/OU=Unit/CN=example.com"
-    WORKING_DIRECTORY ${CMAKE_CURRENT_LIST_DIR}/server
-    OUTPUT_QUIET)
+# 服务端和客户端分别生成密钥、签名请求，再由上述测试 CA 签发。
+foreach(certificate_role IN ITEMS server client)
+  set(certificate_directory "${VIRTRUST_TEST_CERT_DIR}/${certificate_role}")
+  virtrust_generate_test_certificate("${certificate_role} private key" "${certificate_directory}"
+    genrsa -out sk.pem 2048)
+  virtrust_generate_test_certificate("${certificate_role} signing request" "${certificate_directory}"
+    req -new -key sk.pem -out "${certificate_role}.csr"
+    -subj "/C=US/ST=State/L=City/O=Organization/OU=Unit/CN=example.com")
+  virtrust_generate_test_certificate("${certificate_role} certificate" "${certificate_directory}"
+    x509 -req -in "${certificate_role}.csr" -CA ../ca/cert.pem
+    -CAkey ../ca/sk.pem -CAcreateserial -out cert.pem -days 365 -sha256)
+endforeach()
 
-  # Make CA sign server's csr
-  execute_process(
-    COMMAND ${OPENSSL_EXECUTABLE} x509 -req -in server.csr -CA ../ca/cert.pem
-            -CAkey ../ca/sk.pem -CAcreateserial -out cert.pem -days 365 -sha256
-    WORKING_DIRECTORY ${CMAKE_CURRENT_LIST_DIR}/server
-    OUTPUT_QUIET)
-
-  # ------------
-  # client
-  # -----------
-
-  # create client's sk
-  execute_process(
-    COMMAND ${OPENSSL_EXECUTABLE} genrsa -out sk.pem 2048
-    WORKING_DIRECTORY ${CMAKE_CURRENT_LIST_DIR}/client
-    OUTPUT_QUIET)
-
-  # create csr for client
-  execute_process(
-    COMMAND ${OPENSSL_EXECUTABLE} req -new -key sk.pem -out client.csr -subj
-            "/C=US/ST=State/L=City/O=Organization/OU=Unit/CN=example.com"
-    WORKING_DIRECTORY ${CMAKE_CURRENT_LIST_DIR}/client
-    OUTPUT_QUIET)
-
-  # Make CA sign client's csr
-  execute_process(
-    COMMAND ${OPENSSL_EXECUTABLE} x509 -req -in client.csr -CA ../ca/cert.pem
-            -CAkey ../ca/sk.pem -CAcreateserial -out cert.pem -days 365 -sha256
-    WORKING_DIRECTORY ${CMAKE_CURRENT_LIST_DIR}/client
-    OUTPUT_QUIET)
-
-  message(
-    STATUS
-      "Generated test certificates generated at: ${CMAKE_CURRENT_LIST_DIR}/cert"
-  )
-else()
-  message(
-    WARNING "Openssl executable not found. Test certificates not generated.")
-endif()
+message(STATUS "Generated test certificates at: ${VIRTRUST_TEST_CERT_DIR}")

@@ -7,8 +7,8 @@
 #include <sys/file.h>
 #include <sys/wait.h>
 #include <unistd.h>
-#include <filesystem>
 
+#include <filesystem>
 #include <future>
 #include <unordered_set>
 
@@ -136,8 +136,7 @@ bool CalcVirshMeasure(std::string_view guestName, VirshMeasureSummary &measureSu
     }
 #else
     auto filePath = std::filesystem::path(__FILE__);
-    auto testXmlPah = (filePath / ".." / ".." / ".." / "test" / "data" / "test.xml")
-    .lexically_normal().string();
+    auto testXmlPah = (filePath / ".." / ".." / ".." / "test" / "data" / "test.xml").lexically_normal().string();
     if (!xmlParser.Parse(verifyConfig, testXmlPah)) {
         VIRTRUST_LOG_ERROR("|main|END|returnF|file: {}|parse xml file failed.", testXmlPah);
         return false;
@@ -251,8 +250,7 @@ bool CheckGuestBeforeStart(std::string_view domainName, std::string &uuid, std::
     // 转换为tsb-agent需要的结构体
     MeasureInfoSet infos;
 
-    bool res = ConvertTsbStruct(measureSummary.bios, infos.bios) &&
-               ConvertTsbStruct(measureSummary.shim, infos.shim) &&
+    bool res = ConvertTsbStruct(measureSummary.bios, infos.bios) && ConvertTsbStruct(measureSummary.shim, infos.shim) &&
                ConvertTsbStruct(measureSummary.kernel, infos.kernel) &&
                ConvertTsbStruct(measureSummary.initrd, infos.initrd) &&
                ConvertTsbStruct(measureSummary.grub, infos.grub) &&
@@ -264,8 +262,8 @@ bool CheckGuestBeforeStart(std::string_view domainName, std::string &uuid, std::
     }
     // 检查度量值是否通过
     auto start = std::chrono::high_resolution_clock::now();
-    auto tsbRc = CheckMeasure(uuid.data(), infos.bios, infos.shim, infos.grub,
-                              infos.grubCfg, infos.kernel, infos.initrd);
+    auto tsbRc =
+        CheckMeasure(uuid.data(), infos.bios, infos.shim, infos.grub, infos.grubCfg, infos.kernel, infos.initrd);
     auto end = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
     VIRTRUST_LOG_DEBUG("|CheckGuestBeforeStart||calc time-consuming, target: func_checkMeasure, duration:{} ms",
@@ -292,8 +290,7 @@ bool UpdateMeasure(std::string_view domainName, std::string &uuid)
         return false;
     }
     MeasureInfoSet infos;
-    bool res = ConvertTsbStruct(measureSummary.bios, infos.bios) &&
-               ConvertTsbStruct(measureSummary.shim, infos.shim) &&
+    bool res = ConvertTsbStruct(measureSummary.bios, infos.bios) && ConvertTsbStruct(measureSummary.shim, infos.shim) &&
                ConvertTsbStruct(measureSummary.kernel, infos.kernel) &&
                ConvertTsbStruct(measureSummary.initrd, infos.initrd) &&
                ConvertTsbStruct(measureSummary.grub, infos.grub) &&
@@ -302,8 +299,8 @@ bool UpdateMeasure(std::string_view domainName, std::string &uuid)
         FreeMeasureInfo(infos);
         return false;
     }
-    auto tsbRc = UpdateMeasure(uuid.data(), infos.bios, infos.shim, infos.grub,
-                               infos.grubCfg, infos.kernel, infos.initrd);
+    auto tsbRc =
+        UpdateMeasure(uuid.data(), infos.bios, infos.shim, infos.grub, infos.grubCfg, infos.kernel, infos.initrd);
     FreeMeasureInfo(infos);
     if (tsbRc != 0) {
         VIRTRUST_LOG_ERROR("update tsb measure failed:{}", domainName);
@@ -912,6 +909,8 @@ VirtrustRc DomainMigrate(const std::unique_ptr<ConnCtx> &conn, const std::string
     if (!fileLock.IsLocked()) {
         return VirtrustRc::ERROR;
     }
+    // 命令行及 API 默认参数传入删除源端标志；此处补齐离线和目的端持久化标志。
+    // 待后续迁移整改确认是否扩展当前唯一支持的标志组合。
     flags |= VIR_MIGRATE_OFFLINE | VIR_MIGRATE_PERSIST_DEST; // 默认离线迁移 离线迁移必须指定VIR_MIGRATE_PERSIST_DEST
     if (flags != (VIR_MIGRATE_OFFLINE | VIR_MIGRATE_PERSIST_DEST | MIGRATE_UNDEFINE_SOURCE)) {
         VIRTRUST_LOG_ERROR("|DomainMigrate|END|returnF|invalid flags, only support {}",
@@ -919,11 +918,12 @@ VirtrustRc DomainMigrate(const std::unique_ptr<ConnCtx> &conn, const std::string
         return VirtrustRc::ERROR;
     }
     if (destUri.empty() || destUri.find("qemu+tls://") != 0) {
-        VIRTRUST_LOG_ERROR("|DomainMigrate|END|returnF|destUrt is only support starts with qemu+tls://");
+        VIRTRUST_LOG_ERROR("|DomainMigrate|END|returnF|destUri is only support starts with qemu+tls://");
         return VirtrustRc::ERROR;
     }
     // 校验虚拟机是否tsb和virsh都存在 并获取uuid
     std::unordered_map<std::string, DomainInfo> domainInfos;
+    // 查询全部状态并进行一致性检查，随后仅选择已关机目标；收窄查询范围须另行评估检查语义。
     auto ret = DomainList(conn, LIST_DOMAINS_ACTIVE | LIST_DOMAINS_INACTIVE, domainInfos, false);
     if (ret != VirtrustRc::OK) {
         VIRTRUST_LOG_ERROR("|DomainMigrate|END|returnF|failed to get domainInfos");

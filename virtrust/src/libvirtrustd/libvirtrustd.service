@@ -30,7 +30,7 @@ Wants=libvirtd.service
 # - oneshot: 一次性任务，执行完就退出（适合初始化脚本）
 Type=simple
 
-# 运行用户和组：建议创建专用用户替代 root
+# 当前部署约束要求守护进程以 root 运行，不可仅修改此处切换为普通用户。
 User=root
 Group=root
 
@@ -44,10 +44,7 @@ ExecStart=/usr/bin/libvirtrustd --config /etc/virtrust/config.json
 # - on-abnormal: 被信号杀死、超时等异常情况重启
 Restart=on-failure
 
-# ExecReload: 热重载配置命令
-# 发送 SIGHUP 信号通知进程重新加载配置（优雅重启）
-# $MAINPID 是 systemd 自动变量，表示主进程 PID
-ExecReload=/bin/kill -HUP $MAINPID
+# 未实现配置热重载，不配置 ExecReload，避免向进程发送未处理的 SIGHUP。
 
 # ExecStop: 优雅停止命令
 # 发送 SIGTERM 信号请求进程正常退出

@@ -4,6 +4,7 @@
 
 #include <getopt.h>
 
+#include <algorithm>
 #include <string>
 #include <vector>
 

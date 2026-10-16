@@ -92,7 +92,7 @@ install -m 440 %{output_dir}/include/virtrust/base/*.h          %{buildroot}%{_i
 install -pm 640 %{root_dir}/test/data/config.json               %{buildroot}%{_sysconfdir}/virtrust/config.json
 
 # systemd service file
-install -m 640 %{root_dir}/src/libvirtrustd/libvirtrustd.service             %{buildroot}%{_unitdir}/libvirtrustd.service
+install -m 644 %{root_dir}/src/libvirtrustd/libvirtrustd.service             %{buildroot}%{_unitdir}/libvirtrustd.service
 
 %files
 %dir %attr(0750, root, root) %{_sysconfdir}/virtrust/

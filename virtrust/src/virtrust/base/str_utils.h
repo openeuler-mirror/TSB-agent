@@ -9,6 +9,7 @@
 #include <unistd.h>
 
 #include <cctype>
+#include <cstdint>
 #include <cstring>
 #include <fstream>
 #include <memory>
@@ -212,10 +213,11 @@ inline bool CheckFilePathValid(std::string &filePath)
 inline std::string ReadFile(const std::string &filename)
 {
     std::string filePath = filename;
-    std::ifstream file(filePath);
+    // 先校验当前路径再打开；不消除校验与打开之间的路径替换竞态。
     if (!CheckFilePathValid(filePath)) {
         return "";
     }
+    std::ifstream file(filePath);
     return {(std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>()};
 }
 

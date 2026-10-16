@@ -2,14 +2,15 @@
  * Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
  */
 
+#include <fmt/format.h>
 #include <getopt.h>
 #include <unistd.h>
-#include <fmt/format.h>
 
 #include <csignal>
-#include <thread>
 
+#include "libvirtrustd/daemon_instance.h"
 #include "libvirtrustd/defines.h"
+#include "libvirtrustd/entry_boundary.h"
 #include "libvirtrustd/utils.h"
 
 #include "virtrust/base/logger.h"
@@ -53,8 +54,9 @@ void PrintUsage(std::string_view progname)
                progname);
 }
 
-int ProcessArgs(int argc, char **argv)
+int ProcessArgs(int argc, char **argv, const char *&stage)
 {
+    stage = "argument processing";
     int arg = -1;
     int longindex = -1;
     std::vector<option> opt = {
@@ -66,9 +68,7 @@ int ProcessArgs(int argc, char **argv)
     };
 
     std::string configPath;
-    // The leading + means no re-ordering, see man page of getopt_long
-    // The ":" after "c" means it has long arguments from cli, and is parsed to
-    // optarg
+    // 开头的 + 禁止重排参数；c 后的冒号表示该选项需要参数，由 optarg 接收。
     while ((arg = getopt_long(argc, argv, "+c:dhv", opt.data(), &longindex)) != -1) {
         switch (arg) {
             case 'c':
@@ -79,14 +79,14 @@ int ProcessArgs(int argc, char **argv)
                 break;
             case 'v':
                 PrintVersion(argv[0]);
-                return 0; // return with success
+                return 0; // 成功返回。
             case 'h':
                 PrintUsage(argv[0]);
-                return 0; // return with success
+                return 0; // 成功返回。
             case '?':
             default:
                 PrintUsage(argv[0]);
-                return 1; // return with failure
+                return 1; // 失败返回。
         }
     }
 
@@ -94,42 +94,54 @@ int ProcessArgs(int argc, char **argv)
         fmt::print("\n"
                    "  ERROR: Missing requried config files\n");
         PrintUsage(argv[0]);
-        return 1; // return with success
+        return 1; // 失败返回。
     }
 
+    stage = "configuration loading";
     auto ret = MakeLinkConfigFromJsonFile(configPath);
     if (ret.has_value()) {
+        stage = "configuration storage";
         ConfigMgr::Instance().SetLinkConfig(ret.value());
-        GrpcServer sever(ret.value());
-        fmt::print("start link config. Exiting...{}, {}\n", ret.value().udsPath, ret.value().caPath);
-        LinkRc linkRc = sever.Start();
-        if (linkRc != LinkRc::OK) {
-            fmt::print("Failed to start link config. Exiting...\n");
+        // 帮助/版本及配置解析不获取资格；任何 Socket 清理或监听之前必须先持实例锁。
+        // 此对象先停止并销毁服务，再释放锁，覆盖正常退出和启动失败路径。
+        stage = "runtime construction";
+        DaemonRuntime runtime(ret.value(), VIRTRUSTD_RUNTIME_DIRECTORY, 0);
+        stage = "runtime startup";
+        if (runtime.Start() != LockOutcome::Acquired) {
+            try {
+                fmt::print("Daemon startup failed: {}\n", runtime.LastError());
+            } catch (...) {
+            }
             return 1;
         }
 
-        while (g_stopFlag == 0) {
-            std::this_thread::sleep_for(std::chrono::seconds(1));
+        stage = "runtime execution";
+        const int result = runtime.RunUntilStopped([] { return g_stopFlag != 0; });
+        if (result != 0) {
+            // 回收已显式执行；输出失败不能妨碍析构兜底或改变失败退出状态。
+            try {
+                fmt::print("Daemon runtime or cleanup failed: {}\n", runtime.LastError());
+            } catch (...) {
+            }
         }
-        sever.Stop();
+        return result;
     } else {
         fmt::print("\n"
                    "  ERROR: Failed to parse config files\n");
-        // make link config failed
+        // 通信配置创建失败。
         return 1;
     }
-    return 0;
 }
-} // namespace
-} // namespace virtrust
-
-int main(int argc, char **argv)
+// 原入口流程在异常边界内部执行，阶段仅使用静态字符串，不改变启动顺序。
+int RunDaemon(int argc, char **argv, const char *&stage)
 {
-    // register signal handler
+    stage = "signal registration";
+    // 注册信号处理函数。
     signal(SIGINT, virtrust::SignalHandler);
     signal(SIGTERM, virtrust::SignalHandler);
     signal(SIGPIPE, virtrust::SignalHandler);
 
+    stage = "logging initialization";
     auto ret = virtrust::Logger::Instance()->InitLog(static_cast<int>(virtrust::LogLevel::INFO),
                                                      virtrust::VIRTRUSTD_LOGFILE_NAME);
     if (ret != virtrust::VirtrustRc::OK) {
@@ -137,5 +149,12 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    return virtrust::ProcessArgs(argc, argv);
+    return ProcessArgs(argc, argv, stage);
+}
+} // 匿名命名空间
+} // 命名空间 virtrust
+
+int main(int argc, char **argv)
+{
+    return virtrust::RunEntryBoundary(argc, argv, virtrust::RunDaemon);
 }

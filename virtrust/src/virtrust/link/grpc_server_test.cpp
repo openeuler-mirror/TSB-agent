@@ -1,312 +1,576 @@
 /*
- * Copyright (C) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
+ * Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
  */
 
+#include <gtest/gtest.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/un.h>
 #include <unistd.h>
 
-#include <chrono>
+#include <atomic>
+#include <cerrno>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
-#include <string>
-#include <thread>
 
-#include "gtest/gtest.h"
-
-#include "virtrust/link/defines.h"
+#include "virtrust/base/str_utils.h"
 #include "virtrust/link/grpc_server.h"
+#include "virtrust/link/grpc_server_test_peer.h"
 
 namespace virtrust {
+// 独占持有测试描述符，断言提前返回时也会关闭；不提供复制或转交。
+class TestFd {
+public:
+    explicit TestFd(int fd) : fd_(fd)
+    {}
+    ~TestFd()
+    {
+        if (fd_ >= 0) {
+            close(fd_);
+        }
+    }
+    TestFd(const TestFd &) = delete;
+    TestFd &operator=(const TestFd &) = delete;
 
-class GrpcServerTest : public ::testing::Test {
+private:
+    int fd_;
+};
+
+// 显式关闭并检查写入结果，避免错误夹具被误当作业务失败。
+bool WriteFixture(const std::string &path, const char *text)
+{
+    std::ofstream output(path);
+    output << text;
+    output.close();
+    return output.good();
+}
+
+TEST(TestFdTest, EarlyReturnClosesDescriptor)
+{
+    const int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    ASSERT_GE(fd, 0);
+    const auto leaveEarly = [fd] {
+        TestFd owner(fd);
+        return;
+    };
+    leaveEarly();
+    errno = 0;
+    EXPECT_EQ(close(fd), -1);
+    EXPECT_EQ(errno, EBADF);
+}
+
+// 独立目录与临时端口，不接触真实服务；子进程隔离旧实现 terminate 的故障。
+class GrpcServerTest : public testing::Test {
 protected:
     void SetUp() override
     {
-        // Initialize test configuration
-        linkConfig_.caPath = "/test/ca.pem";
-        linkConfig_.certPath = "/test/cert.pem";
-        linkConfig_.skPath = "/test/sk.pem";
-        linkConfig_.ip = "127.0.0.1";
-        linkConfig_.ipMask = "127.0.0.0/24";
-        linkConfig_.port = 50052; // Use different port to avoid conflicts
-        linkConfig_.udsPath = "/tmp/test_grpc_server.sock";
+        char pattern[] = "/tmp/virtrust-server-ut.XXXXXX";
+        const char *created = mkdtemp(pattern);
+        ASSERT_NE(created, nullptr);
+        directory = created;
+        config.ip = "127.0.0.1";
+        config.port = 0;
+        config.udsPath = directory + "/rpc.sock";
     }
-
     void TearDown() override
     {
-        // Clean up any leftover UDS file
-        std::filesystem::remove(linkConfig_.udsPath.c_str());
+        if (!directory.empty()) {
+            std::filesystem::remove_all(directory);
+        }
     }
-
-    LinkConfig linkConfig_;
+    std::string directory;
+    LinkConfig config{};
 };
 
-TEST_F(GrpcServerTest, Constructor)
+TEST_F(GrpcServerTest, FailedStartCanBeStoppedAndDestroyedRepeatedly)
 {
-    // Test that GrpcServer can be constructed with valid config
-    GrpcServer server(linkConfig_);
-
-    // The constructor should not throw, and the server should be valid
-    SUCCEED();
+    config.udsPath = directory + "/missing/rpc.sock";
+    EXPECT_EXIT(
+        {
+            bool ok = true;
+            {
+                GrpcServer server(config);
+                for (int i = 0; i < 3; ++i) {
+                    ok = (server.Start() == LinkRc::ERROR) && ok;
+                    server.Stop();
+                    server.Stop();
+                }
+            }
+            _exit(ok ? 0 : 1);
+        },
+        testing::ExitedWithCode(0), "");
 }
 
-TEST_F(GrpcServerTest, ConstructorWithEmptyConfig)
+// 不安全父目录必须在本层 Socket 查询/删除与线程创建/服务构建前拒绝，不自动修改权限。
+TEST_F(GrpcServerTest, UnsafeParentRejectedBeforeSocketOperations)
 {
-    // Test with empty config
-    LinkConfig emptyConfig;
-    GrpcServer server(emptyConfig);
-
-    // Should still construct successfully
-    SUCCEED();
+    for (mode_t mode : {0755, 0770, 0777}) {
+        SCOPED_TRACE(mode);
+        ASSERT_EQ(chmod(directory.c_str(), mode), 0);
+        int stats = 0;
+        int unlinks = 0;
+        std::atomic<int> starts{0};
+        std::atomic<int> builds{0};
+        {
+            GrpcServer server(config);
+            auto &ops = GrpcServerTestPeer::Ops(server);
+            ops.stat = [&](const char *path, struct stat *info) {
+                ++stats;
+                return lstat(path, info);
+            };
+            ops.unlink = [&](const char *path) {
+                ++unlinks;
+                return unlink(path);
+            };
+            // 保留真实操作，仅统计入口调用；计数器活到 server 析构之后。
+            const auto start = ops.start;
+            ops.start = [&, start](GrpcServer &owner, std::promise<GrpcServerTestPeer::StartupResult> ready) {
+                ++starts;
+                return start(owner, std::move(ready));
+            };
+            ops.build = [&](grpc::ServerBuilder &builder) {
+                ++builds;
+                return builder.BuildAndStart();
+            };
+            EXPECT_EQ(server.Start(), LinkRc::ERROR);
+            EXPECT_NE(server.LastError().find("UDS parent"), std::string::npos);
+            EXPECT_EQ(stats, 0);
+            EXPECT_EQ(unlinks, 0);
+            EXPECT_EQ(starts.load(), 0);
+            EXPECT_EQ(builds.load(), 0);
+            EXPECT_FALSE(GrpcServerTestPeer::HasThreadObject(server));
+            struct stat info {};
+            ASSERT_EQ(stat(directory.c_str(), &info), 0);
+            EXPECT_EQ(info.st_mode & 07777, mode);
+            EXPECT_EQ(server.Stop(), StopResult::Stopped);
+        }
+        // 覆盖显式 Stop 以及析构，不能只观察 Start 返回时刻。
+        EXPECT_EQ(stats, 0);
+        EXPECT_EQ(unlinks, 0);
+        EXPECT_EQ(starts.load(), 0);
+        EXPECT_EQ(builds.load(), 0);
+    }
+    ASSERT_EQ(chmod(directory.c_str(), 0700), 0);
 }
 
-TEST_F(GrpcServerTest, StartAndStop)
+// 即使符号链接指向安全目录，也不允许通过它访问生产端点。
+TEST_F(GrpcServerTest, SymlinkParentRejected)
 {
-    GrpcServer server(linkConfig_);
+    const auto alias = directory + "/alias";
+    ASSERT_EQ(symlink(directory.c_str(), alias.c_str()), 0);
+    config.udsPath = alias + "/rpc.sock";
+    GrpcServer server(config);
+    EXPECT_EQ(server.Start(), LinkRc::ERROR);
+    EXPECT_NE(server.LastError().find("UDS parent"), std::string::npos);
+    EXPECT_NE(server.LastError().find("directory=[" + alias + "]"), std::string::npos);
+    EXPECT_FALSE(std::filesystem::exists(directory + "/rpc.sock"));
+}
 
-    // Start the server
-    LinkRc startResult = server.Start();
+// 末级 0700 不能抵消上级目录被其他用户替换的风险。
+TEST_F(GrpcServerTest, WritableAncestorRejected)
+{
+    const auto parent = directory + "/private";
+    ASSERT_EQ(mkdir(parent.c_str(), 0700), 0);
+    ASSERT_EQ(chmod(parent.c_str(), 0700), 0);
+    struct stat info {};
+    ASSERT_EQ(stat(parent.c_str(), &info), 0);
+    ASSERT_EQ(info.st_uid, geteuid());
+    ASSERT_EQ(info.st_mode & 07777, static_cast<mode_t>(0700));
+    ASSERT_EQ(chmod(directory.c_str(), 0777), 0);
+    config.udsPath = parent + "/rpc.sock";
+    GrpcServer server(config);
+    EXPECT_EQ(server.Start(), LinkRc::ERROR);
+    EXPECT_NE(server.LastError().find("untrusted ancestor"), std::string::npos);
+    EXPECT_NE(server.LastError().find("directory=[" + directory + "]"), std::string::npos);
+    ASSERT_EQ(chmod(directory.c_str(), 0700), 0);
+}
 
-    // Give the server a moment to start
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+// 实际属主检查需要特权；普通用户测试明确跳过，不能当作已完成权限验收。
+TEST_F(GrpcServerTest, ForeignParentOwnerRejected)
+{
+    if (geteuid() != 0) {
+        GTEST_SKIP() << "Root is required to change directory ownership";
+    }
+    const auto parent = directory + "/foreign";
+    ASSERT_EQ(mkdir(parent.c_str(), 0700), 0);
+    // 只改变属主，不引入属组差异；显式设置并核验权限以排除 umask 影响。
+    ASSERT_EQ(chown(parent.c_str(), 1, static_cast<gid_t>(-1)), 0);
+    ASSERT_EQ(chmod(parent.c_str(), 0700), 0);
+    struct stat info {};
+    ASSERT_EQ(stat(parent.c_str(), &info), 0);
+    ASSERT_EQ(info.st_uid, 1U);
+    ASSERT_EQ(info.st_mode & 07777, static_cast<mode_t>(0700));
+    config.udsPath = parent + "/rpc.sock";
+    GrpcServer server(config);
+    EXPECT_EQ(server.Start(), LinkRc::ERROR);
+    EXPECT_NE(server.LastError().find("owned by the effective UID"), std::string::npos);
+    EXPECT_NE(server.LastError().find("directory=[" + parent + "]"), std::string::npos);
+}
 
-    // Stop the server
+// 运行后目录权限变化时先回收资源，拒绝本层 Socket lstat/unlink，并保留身份供修复后重试。
+// 父目录检查仍访问文件系统，gRPC 销毁阶段的内部清理也不在本层计数范围内。
+TEST_F(GrpcServerTest, UnsafeParentPreventsCleanupAndAllowsRetryAfterRepair)
+{
+    int stats = 0;
+    int unlinks = 0;
+    int missingPaths = 0;
+    GrpcServer server(config);
+    auto &ops = GrpcServerTestPeer::Ops(server);
+    ops.stat = [&](const char *path, struct stat *info) {
+        ++stats;
+        const int result = lstat(path, info);
+        if (result != 0 && errno == ENOENT) {
+            ++missingPaths;
+        }
+        return result;
+    };
+    ops.unlink = [&](const char *path) {
+        ++unlinks;
+        return unlink(path);
+    };
+    ASSERT_EQ(server.Start(), LinkRc::OK) << server.LastError();
+    struct stat original {};
+    ASSERT_EQ(lstat(config.udsPath.c_str(), &original), 0);
+    ASSERT_TRUE(S_ISSOCK(original.st_mode));
+    ASSERT_TRUE(GrpcServerTestPeer::HasIdentity(server));
+    ASSERT_EQ(GrpcServerTestPeer::SocketDevice(server), original.st_dev);
+    ASSERT_EQ(GrpcServerTestPeer::SocketInode(server), original.st_ino);
+    // 回调在启动前安装，启动成功后重置计数，后续只观察停止阶段。
+    stats = 0;
+    unlinks = 0;
+    missingPaths = 0;
+    ASSERT_EQ(chmod(directory.c_str(), 0755), 0);
+    EXPECT_EQ(server.Stop(), StopResult::PathCleanupFailed);
+    const auto error = server.LastError();
+    EXPECT_NE(error.find("UDS cleanup refused"), std::string::npos);
+    EXPECT_NE(error.find("mode 0700"), std::string::npos);
+    EXPECT_NE(error.find(config.udsPath), std::string::npos);
+    ASSERT_FALSE(GrpcServerTestPeer::HasThreadObject(server));
+    ASSERT_FALSE(GrpcServerTestPeer::HasServer(server));
+    ASSERT_FALSE(GrpcServerTestPeer::HasService(server));
+    EXPECT_EQ(stats, 0);
+    EXPECT_EQ(unlinks, 0);
+    EXPECT_TRUE(GrpcServerTestPeer::HasIdentity(server));
+    EXPECT_EQ(GrpcServerTestPeer::SocketDevice(server), original.st_dev);
+    EXPECT_EQ(GrpcServerTestPeer::SocketInode(server), original.st_ino);
+    // 未修复权限再次停止，仍不能进入本层路径查询或删除，且不能改写原身份。
+    EXPECT_EQ(server.Stop(), StopResult::PathCleanupFailed);
+    EXPECT_EQ(stats, 0);
+    EXPECT_EQ(unlinks, 0);
+    EXPECT_EQ(missingPaths, 0);
+    EXPECT_TRUE(GrpcServerTestPeer::HasIdentity(server));
+    EXPECT_EQ(GrpcServerTestPeer::SocketDevice(server), original.st_dev);
+    EXPECT_EQ(GrpcServerTestPeer::SocketInode(server), original.st_ino);
+    ASSERT_EQ(chmod(directory.c_str(), 0700), 0);
+    // 服务资源已释放；若第三方仍留下原 Socket，由夹具移除以确定性覆盖 ENOENT。
+    // 此删除不计入被测操作，也不证明本层 unlink 成功分支；替换对象绝不删除。
+    struct stat remaining {};
+    const int remainingResult = lstat(config.udsPath.c_str(), &remaining);
+    if (remainingResult == 0) {
+        ASSERT_TRUE(S_ISSOCK(remaining.st_mode));
+        ASSERT_EQ(remaining.st_dev, original.st_dev);
+        ASSERT_EQ(remaining.st_ino, original.st_ino);
+        ASSERT_EQ(unlink(config.udsPath.c_str()), 0);
+    } else {
+        ASSERT_EQ(errno, ENOENT);
+    }
+    EXPECT_EQ(server.Stop(), StopResult::Stopped);
+    EXPECT_FALSE(GrpcServerTestPeer::HasIdentity(server));
+    EXPECT_EQ(stats, 1);
+    EXPECT_EQ(missingPaths, 1);
+    EXPECT_EQ(unlinks, 0);
+    struct stat info {};
+    ASSERT_EQ(lstat(config.udsPath.c_str(), &info), -1);
+    EXPECT_EQ(errno, ENOENT);
+    // 身份已清除，重复停止不能再次查询或删除路径。
+    EXPECT_EQ(server.Stop(), StopResult::Stopped);
+    EXPECT_EQ(stats, 1);
+    EXPECT_EQ(missingPaths, 1);
+    EXPECT_EQ(unlinks, 0);
+}
+
+TEST_F(GrpcServerTest, ExistingRegularFileIsNeverDeleted)
+{
+    ASSERT_TRUE(WriteFixture(config.udsPath, "keep"));
+    EXPECT_EXIT(
+        {
+            bool ok;
+            {
+                GrpcServer server(config);
+                ok = server.Start() == LinkRc::ERROR;
+                server.Stop();
+            }
+            std::ifstream input(config.udsPath);
+            std::string text;
+            input >> text;
+            _exit(ok && text == "keep" ? 0 : 1);
+        },
+        testing::ExitedWithCode(0), "");
+}
+
+TEST_F(GrpcServerTest, SymlinkIsNeverDeleted)
+{
+    ASSERT_EQ(symlink("missing-target", config.udsPath.c_str()), 0);
+    EXPECT_EXIT(
+        {
+            bool ok;
+            {
+                GrpcServer server(config);
+                ok = server.Start() == LinkRc::ERROR;
+                server.Stop();
+            }
+            _exit(ok && std::filesystem::is_symlink(config.udsPath) &&
+                          std::filesystem::read_symlink(config.udsPath) == "missing-target"
+                      ? 0
+                      : 1);
+        },
+        testing::ExitedWithCode(0), "");
+}
+
+TEST_F(GrpcServerTest, DestructorStopsSuccessfulServerAndAllowsRestart)
+{
+    EXPECT_EXIT(
+        {
+            bool ok = true;
+            for (int i = 0; i < 3; ++i) {
+                GrpcServer server(config);
+                ok = (server.Start() == LinkRc::OK) && ok;
+                ok = (server.Start() == LinkRc::ERROR) && ok;
+            }
+            _exit(ok ? 0 : 1);
+        },
+        testing::ExitedWithCode(0), "");
+}
+
+TEST_F(GrpcServerTest, ActiveSocketIsNotRemovedByAnotherServer)
+{
+    const int socketFd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    TestFd socketOwner(socketFd);
+    ASSERT_GE(socketFd, 0);
+    sockaddr_un address{};
+    address.sun_family = AF_UNIX;
+    config.udsPath.copy(address.sun_path, sizeof(address.sun_path) - 1);
+    const int bound = bind(socketFd, reinterpret_cast<sockaddr *>(&address), sizeof(address));
+    const int listening = bound == 0 ? listen(socketFd, 8) : -1;
+    if (listening != 0) {
+        FAIL() << "cannot create isolated socket";
+    }
+    struct stat before {};
+    ASSERT_EQ(lstat(config.udsPath.c_str(), &before), 0);
+    EXPECT_EXIT(
+        {
+            bool ok;
+            {
+                GrpcServer server(config);
+                ok = server.Start() == LinkRc::ERROR;
+                server.Stop();
+            }
+            struct stat after {};
+            _exit(ok && lstat(config.udsPath.c_str(), &after) == 0 && before.st_ino == after.st_ino ? 0 : 1);
+        },
+        testing::ExitedWithCode(0), "");
+}
+// 同一对象反复 Start/Stop，验证线程和服务指针均已回收，诊断也可再次使用。
+TEST_F(GrpcServerTest, SameObjectCanRestartAndReportFailures)
+{
+    GrpcServer server(config);
     server.Stop();
-
-    // Both start and stop should succeed
-    EXPECT_EQ(startResult, LinkRc::OK);
-}
-
-TEST_F(GrpcServerTest, StartTwice)
-{
-    GrpcServer server(linkConfig_);
-
-    // Start the server first time
-    LinkRc firstStart = server.Start();
-
-    // Give the server a moment to start
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-
-    // Try to start again - should fail
-    LinkRc secondStart = server.Start();
-
-    // Stop the server
-    server.Stop();
-
-    // First start should succeed, second should fail
-    EXPECT_EQ(firstStart, LinkRc::OK);
-    EXPECT_EQ(secondStart, LinkRc::ERROR);
-}
-
-TEST_F(GrpcServerTest, StopWithoutStart)
-{
-    GrpcServer server(linkConfig_);
-
-    // Stop the server without starting it - should not crash
-    server.Stop();
-
-    // Should complete without issues
-    SUCCEED();
-}
-
-TEST_F(GrpcServerTest, StartStopMultipleTimes)
-{
-    GrpcServer server(linkConfig_);
-
-    for (int i = 0; i < 3; i++) {
-        // Start the server
-        LinkRc startResult = server.Start();
-
-        // Give the server a moment to start
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-        // Stop the server
+    for (int i = 0; i < 3; ++i) {
+        ASSERT_EQ(server.Start(), LinkRc::OK) << server.LastError();
+        EXPECT_TRUE(server.LastError().empty());
+        EXPECT_EQ(server.Start(), LinkRc::ERROR);
+        EXPECT_FALSE(server.LastError().empty());
         server.Stop();
-
-        // Each start should succeed
-        EXPECT_EQ(startResult, LinkRc::OK);
-
-        // Brief pause between iterations
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    }
-}
-
-TEST_F(GrpcServerTest, StartWithInvalidPort)
-{
-    LinkConfig invalidConfig = linkConfig_;
-    invalidConfig.port = 0; // Invalid port
-
-    GrpcServer server(invalidConfig);
-
-    // Starting with invalid port should handle gracefully
-    LinkRc startResult = server.Start();
-    (void)startResult; // Suppress unused variable warning
-
-    // Give it a moment to attempt starting
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-
-    server.Stop();
-
-    // Start should handle the invalid port gracefully
-    // The exact result depends on gRPC implementation
-    // but it should not crash
-    SUCCEED();
-}
-
-TEST_F(GrpcServerTest, StartWithPrivilegedPort)
-{
-    LinkConfig privilegedConfig = linkConfig_;
-    privilegedConfig.port = 80; // Privileged port (might fail)
-
-    GrpcServer server(privilegedConfig);
-
-    // Starting with privileged port might fail due to permissions
-    LinkRc startResult = server.Start();
-    (void)startResult; // Suppress unused variable warning
-
-    // Give it a moment to attempt starting
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-
-    server.Stop();
-
-    // Should handle privileged port gracefully (might succeed or fail depending on permissions)
-    SUCCEED();
-}
-
-TEST_F(GrpcServerTest, StartWithInvalidUdsPath)
-{
-    LinkConfig invalidConfig = linkConfig_;
-    invalidConfig.udsPath = ""; // Empty UDS path
-
-    GrpcServer server(invalidConfig);
-
-    // Starting with invalid UDS path should handle gracefully
-    LinkRc startResult = server.Start();
-    (void)startResult; // Suppress unused variable warning
-
-    // Give it a moment to attempt starting
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-
-    server.Stop();
-
-    // Should handle the invalid UDS path gracefully
-    // The exact result depends on gRPC implementation
-    SUCCEED();
-}
-
-TEST_F(GrpcServerTest, StartWithLongUdsPath)
-{
-    LinkConfig longPathConfig = linkConfig_;
-    longPathConfig.udsPath =
-        "/tmp/very_long_uds_path_name_that_exceeds_normal_filesystem_limits_and_should_test_error_handling.sock";
-
-    GrpcServer server(longPathConfig);
-
-    // Starting with very long UDS path should handle gracefully
-    LinkRc startResult = server.Start();
-    (void)startResult; // Suppress unused variable warning
-
-    // Give it a moment to attempt starting
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-
-    server.Stop();
-
-    // Should handle the long UDS path gracefully
-    SUCCEED();
-}
-
-TEST_F(GrpcServerTest, ServerLifecycleWithRapidStartStop)
-{
-    GrpcServer server(linkConfig_);
-
-    // Test rapid start/stop cycles
-    for (int i = 0; i < 5; i++) {
-        LinkRc startResult = server.Start();
-        (void)startResult; // Suppress unused variable warning
-
-        // Very short start time
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-
         server.Stop();
-
-        // Brief pause
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
-
-    // Should handle rapid cycles without issues
-    SUCCEED();
 }
 
-TEST_F(GrpcServerTest, ServerHandlesExistingUdsFile)
+TEST_F(GrpcServerTest, StaleSocketCanBeReplaced)
 {
-    // Create a file at the UDS path first
-    std::ofstream existingFile(linkConfig_.udsPath);
-    existingFile << "existing content";
-    existingFile.close();
-
-    GrpcServer server(linkConfig_);
-
-    // Server should handle existing file at UDS path gracefully
-    LinkRc startResult = server.Start();
-    (void)startResult; // Suppress unused variable warning
-
-    // Give it a moment to start
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-
+    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    ASSERT_GE(fd, 0);
+    sockaddr_un address{};
+    address.sun_family = AF_UNIX;
+    config.udsPath.copy(address.sun_path, sizeof(address.sun_path) - 1);
+    int result = bind(fd, reinterpret_cast<sockaddr *>(&address), sizeof(address));
+    close(fd);
+    ASSERT_EQ(result, 0);
+    GrpcServer server(config);
+    EXPECT_EQ(server.Start(), LinkRc::OK) << server.LastError();
     server.Stop();
-
-    // Should handle existing file gracefully
-    SUCCEED();
+    EXPECT_FALSE(std::filesystem::exists(config.udsPath));
 }
 
-TEST_F(GrpcServerTest, ServerWithDifferentPorts)
+TEST_F(GrpcServerTest, InvalidTlsReturnsDiagnosticWithoutLeavingThread)
 {
-    std::vector<uint16_t> testPorts = {50053, 50054, 50055, 50056};
-
-    for (uint16_t port : testPorts) {
-        LinkConfig testConfig = linkConfig_;
-        testConfig.port = port;
-        testConfig.udsPath = "/tmp/test_grpc_server_" + std::to_string(port) + ".sock";
-
-        GrpcServer server(testConfig);
-
-        LinkRc startResult = server.Start();
-
-        // Give it a moment to start
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-        server.Stop();
-
-        // Clean up UDS file
-        std::filesystem::remove(testConfig.udsPath.c_str());
-
-        // Each port should be handled gracefully
-        EXPECT_EQ(startResult, LinkRc::OK);
-    }
-}
-
-TEST_F(GrpcServerTest, ServerConcurrentOperations)
-{
-    GrpcServer server(linkConfig_);
-
-    // Start server in background
-    std::thread startThread([&server]() {
-        LinkRc result = server.Start();
-        EXPECT_EQ(result, LinkRc::OK);
-    });
-
-    // Give server time to start
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-    // Stop server
+    config.caPath = directory + "/absent-ca";
+    config.certPath = directory + "/absent-cert";
+    config.skPath = directory + "/absent-key";
+    GrpcServer server(config);
+    EXPECT_EQ(server.Start(), LinkRc::ERROR);
+    EXPECT_FALSE(server.LastError().empty());
     server.Stop();
-
-    // Wait for start thread to complete
-    if (startThread.joinable()) {
-        startThread.join();
+}
+// 逐个凭据失败都必须定位类别和路径；其他凭据使用真实有效夹具，避免前序失败遮蔽目标。
+TEST_F(GrpcServerTest, TlsCredentialReadFailureNamesKindAndPathBeforeBuild)
+{
+    const char *kinds[] = {"private_key", "certificate", "ca"};
+    const std::string certRoot = VIRTRUST_TEST_CERT_DIR;
+    for (int kind = 0; kind < 3; ++kind) {
+        for (bool empty : {false, true}) {
+            SCOPED_TRACE(kind);
+            SCOPED_TRACE(empty);
+            config.skPath = certRoot + "/server/sk.pem";
+            config.certPath = certRoot + "/server/cert.pem";
+            config.caPath = certRoot + "/ca/cert.pem";
+            ASSERT_FALSE(ReadFile(config.skPath).empty());
+            ASSERT_FALSE(ReadFile(config.certPath).empty());
+            ASSERT_FALSE(ReadFile(config.caPath).empty());
+            const auto path = directory + "/" + kinds[kind] + (empty ? "-empty" : "-missing");
+            if (empty) {
+                ASSERT_TRUE(WriteFixture(path, ""));
+                ASSERT_EQ(std::filesystem::file_size(path), 0u);
+            } else {
+                ASSERT_FALSE(std::filesystem::exists(path));
+            }
+            if (kind == 0) {
+                config.skPath = path;
+            } else if (kind == 1) {
+                config.certPath = path;
+            } else {
+                config.caPath = path;
+            }
+            std::atomic<int> builds{0};
+            GrpcServer server(config);
+            GrpcServerTestPeer::Ops(server).build = [&](grpc::ServerBuilder &builder) {
+                ++builds;
+                return builder.BuildAndStart();
+            };
+            EXPECT_EQ(server.Start(), LinkRc::ERROR);
+            const auto detail = server.LastError();
+            const auto expected = std::string("TLS ") + kinds[kind] + " read failed or file is empty [" + path +
+                                  "]; no plaintext fallback";
+            EXPECT_NE(detail.find(expected), std::string::npos);
+            EXPECT_EQ(detail.find("BEGIN PRIVATE KEY"), std::string::npos);
+            EXPECT_EQ(detail.find("BEGIN CERTIFICATE"), std::string::npos);
+            EXPECT_EQ(builds.load(), 0);
+            EXPECT_EQ(server.Stop(), StopResult::Stopped);
+            EXPECT_FALSE(GrpcServerTestPeer::HasThreadObject(server));
+            EXPECT_FALSE(GrpcServerTestPeer::HasServer(server));
+            EXPECT_FALSE(GrpcServerTestPeer::HasService(server));
+            EXPECT_FALSE(GrpcServerTestPeer::HasIdentity(server));
+            EXPECT_FALSE(std::filesystem::exists(config.udsPath));
+        }
     }
-
-    // Should handle concurrent operations without issues
-    SUCCEED();
 }
 
-} // namespace virtrust
+// 诊断必须指向实际路径和检查阶段，而非只返回无法定位的泛化错误。
+TEST_F(GrpcServerTest, RegularFileDiagnosticIncludesPathAndStage)
+{
+    ASSERT_TRUE(WriteFixture(config.udsPath, "keep"));
+    GrpcServer server(config);
+    ASSERT_EQ(server.Start(), LinkRc::ERROR);
+    EXPECT_NE(server.LastError().find(config.udsPath), std::string::npos);
+    EXPECT_NE(server.LastError().find("type check"), std::string::npos);
+    EXPECT_NE(server.LastError().find("tcp=127.0.0.1:0"), std::string::npos);
+    EXPECT_NE(server.LastError().find("server_created=not_attempted"), std::string::npos);
+    EXPECT_NE(server.LastError().find("tcp_result=not_attempted"), std::string::npos);
+    EXPECT_NE(server.LastError().find("uds_result=not_attempted"), std::string::npos);
+    EXPECT_TRUE(std::filesystem::is_regular_file(config.udsPath));
+}
+
+TEST_F(GrpcServerTest, ParentOpenFailureDiagnosticIncludesErrno)
+{
+    const std::string file = directory + "/not-directory";
+    ASSERT_TRUE(WriteFixture(file, "keep"));
+    config.udsPath = file + "/rpc.sock";
+    GrpcServer server(config);
+    ASSERT_EQ(server.Start(), LinkRc::ERROR);
+    EXPECT_NE(server.LastError().find(config.udsPath), std::string::npos);
+    EXPECT_NE(server.LastError().find("UDS parent check failed"), std::string::npos);
+    EXPECT_NE(server.LastError().find("errno=" + std::to_string(ENOTDIR)), std::string::npos);
+}
+// 不完整的 TLS 配置不能静默回退到明文监听。
+TEST_F(GrpcServerTest, PartialTlsConfigurationIsRejected)
+{
+    for (unsigned mask = 1; mask < 7; ++mask) {
+        SCOPED_TRACE(mask);
+        std::atomic<int> builds{0};
+        config.skPath = (mask & 1) ? directory + "/key" : "";
+        config.certPath = (mask & 2) ? directory + "/cert" : "";
+        config.caPath = (mask & 4) ? directory + "/ca" : "";
+        GrpcServer server(config);
+        GrpcServerTestPeer::Ops(server).build = [&](grpc::ServerBuilder &builder) {
+            ++builds;
+            return builder.BuildAndStart();
+        };
+        EXPECT_EQ(server.Start(), LinkRc::ERROR) << mask;
+        EXPECT_NE(server.LastError().find("Incomplete TLS configuration"), std::string::npos);
+        std::string missing;
+        if (!(mask & 1)) {
+            missing += "private_key ";
+        }
+        if (!(mask & 2)) {
+            missing += "certificate ";
+        }
+        if (!(mask & 4)) {
+            missing += "ca ";
+        }
+        const auto detail = server.LastError();
+        const auto missingPosition = detail.find("missing=");
+        EXPECT_NE(missingPosition, std::string::npos);
+        if (missingPosition != std::string::npos) {
+            EXPECT_EQ(detail.substr(missingPosition + std::string("missing=").size()), missing);
+        }
+        EXPECT_EQ(server.Stop(), StopResult::Stopped);
+        EXPECT_EQ(builds.load(), 0);
+        EXPECT_FALSE(GrpcServerTestPeer::HasThreadObject(server));
+        EXPECT_FALSE(GrpcServerTestPeer::HasServer(server));
+        EXPECT_FALSE(GrpcServerTestPeer::HasService(server));
+    }
+}
+
+TEST_F(GrpcServerTest, MissingParentReportsListenersNotAttempted)
+{
+    config.udsPath = directory + "/missing/rpc.sock";
+    GrpcServer server(config);
+    ASSERT_EQ(server.Start(), LinkRc::ERROR);
+    const auto error = server.LastError();
+    EXPECT_NE(error.find("UDS parent check failed"), std::string::npos);
+    EXPECT_NE(error.find("tcp=127.0.0.1:0"), std::string::npos);
+    EXPECT_NE(error.find(config.udsPath), std::string::npos);
+    EXPECT_NE(error.find("server_created=not_attempted"), std::string::npos);
+    EXPECT_NE(error.find("tcp_result=not_attempted"), std::string::npos);
+    EXPECT_NE(error.find("uds_result=not_attempted"), std::string::npos);
+}
+
+// 使用本机构建生成的证书，不在仓库中添加任何私钥材料。
+TEST_F(GrpcServerTest, CompleteTlsConfigurationStartsWithoutPlaintextFallback)
+{
+    const std::string certRoot = VIRTRUST_TEST_CERT_DIR;
+    config.skPath = certRoot + "/server/sk.pem";
+    config.certPath = certRoot + "/server/cert.pem";
+    config.caPath = certRoot + "/ca/cert.pem";
+    ASSERT_FALSE(ReadFile(config.skPath).empty());
+    ASSERT_FALSE(ReadFile(config.certPath).empty());
+    ASSERT_FALSE(ReadFile(config.caPath).empty());
+    GrpcServer server(config);
+    ASSERT_EQ(server.Start(), LinkRc::OK) << server.LastError();
+    EXPECT_EQ(server.Stop(), StopResult::Stopped);
+}
+
+TEST_F(GrpcServerTest, NonemptyInvalidCertificatesFailWithoutDowngrade)
+{
+    config.skPath = directory + "/key";
+    config.certPath = directory + "/cert";
+    config.caPath = directory + "/ca";
+    ASSERT_TRUE(WriteFixture(config.skPath, "invalid-key"));
+    ASSERT_TRUE(WriteFixture(config.certPath, "invalid-cert"));
+    ASSERT_TRUE(WriteFixture(config.caPath, "invalid-ca"));
+    GrpcServer server(config);
+    EXPECT_EQ(server.Start(), LinkRc::ERROR);
+    EXPECT_NE(server.LastError().find("BuildAndStart"), std::string::npos);
+    EXPECT_EQ(server.Stop(), StopResult::Stopped);
+}
+} // 命名空间 virtrust
