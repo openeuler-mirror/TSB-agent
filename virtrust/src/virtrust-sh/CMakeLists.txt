@@ -26,3 +26,12 @@ target_include_directories(
 
 target_link_libraries(virtrust-sh PRIVATE virtrust-sh-obj virtrust-shared
                                       Deps::spdlog)
+
+if(BUILD_TEST AND ENABLE_MOCK_4_FUZZ)
+  add_virtrust_sh_test_if(cli_busy_test)
+  target_link_libraries(cli_busy_test PRIVATE domain-admission-test-obj Deps::secure_c)
+  target_include_directories(cli_busy_test PRIVATE ${CMAKE_BINARY_DIR}/src
+    ${CMAKE_BINARY_DIR}/src/virtrust)
+  target_link_options(cli_busy_test PRIVATE ${VIRTRUST_ADMISSION_TEST_WRAP_OPTIONS})
+  set_tests_properties(cli_busy_test PROPERTIES TIMEOUT 15)
+endif()
