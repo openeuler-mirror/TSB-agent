@@ -4,30 +4,54 @@
 
 #include <getopt.h>
 
+#include <algorithm>
 #include <string>
 #include <vector>
 
 #include "virtrust-sh/operator/op_itf.h"
 #include "virtrust-sh/operator/op_utils.h"
+#include "virtrust/api/create_connection_args.h"
 #include "virtrust/api/domain.h"
 
 namespace virtrust {
 
 OpRc OpCreate::Exec()
 {
-    // make connection
+    const auto parsed = ParseCreateConnectionArgs(virtInstallArgs_);
+    // 主命令候选始终排在 create 子命令候选之前；各组内部保留用户输入顺序。
+    std::vector<std::string> candidates = config_.uriCandidates;
+    candidates.insert(candidates.end(), parsed.candidates.begin(), parsed.candidates.end());
+    // 只有完全没有显式连接选项时才尝试项目默认 URI。
+    if (candidates.empty() && config_.uriCandidates.empty() && !parsed.hasExplicitOption) {
+        candidates.push_back(config_.uri);
+    }
+
     conn_.reset();
-    conn_ = std::make_unique<ConnCtx>();
-    if (!conn_->SetUri(config_.uri)) {
-        VIRTRUST_LOG_ERROR("Failed to set uri: {}", config_.uri);
+    // 连接失败可换下一个候选；每次使用新对象，避免失败句柄或 URI 状态相互污染。
+    for (const auto &candidate : candidates) {
+        if (!IsUsableConnectionCandidate(candidate)) {
+            VIRTRUST_LOG_ERROR("Skipping invalid create connection URI.");
+            continue;
+        }
+        auto attempt = std::make_unique<ConnCtx>();
+        if (!attempt->SetUri(candidate) || !attempt->Connect()) {
+            VIRTRUST_LOG_ERROR("Failed to establish create connection to: {}", candidate);
+            continue;
+        }
+        conn_ = std::move(attempt);
+        config_.uri = candidate;
+        // 连接已经选定，后续业务失败也不能改选另一台宿主机重试。
+        break;
+    }
+    if (conn_ == nullptr) {
+        VIRTRUST_LOG_ERROR("No create connection URI could be opened.");
         return OpRc::ERROR;
     }
-    conn_->Connect();
-    if (conn_->Get() == nullptr) {
-        VIRTRUST_LOG_ERROR("Failed to establish connection to: {}", config_.uri);
-        return OpRc::ERROR;
-    }
-    return ParseVirtrustRc(DomainCreate(conn_, virtInstallArgs_));
+    // 删除所有原始连接选项，只把选中 URI 传给 API 和 virt-install 子进程。
+    auto createArgs = parsed.argsWithoutConnection;
+    const auto optionEnd = std::find(createArgs.begin(), createArgs.end(), "--");
+    createArgs.insert(optionEnd, {"--connect", conn_->GetUri()});
+    return ParseVirtrustRc(DomainCreate(conn_, createArgs));
 }
 
 // Parse the args from command line

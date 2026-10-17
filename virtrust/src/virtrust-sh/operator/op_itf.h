@@ -6,6 +6,7 @@
 #include <memory>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include "virtrust/api/context.h"
 #include "virtrust/base/logger.h"
@@ -17,6 +18,8 @@ enum class OpRc : uint32_t {
     OK = 0,
     ERROR = 1,
     CHECK_FAILED = 2,
+    // 普通变更未取得节点准入资格；命令入口负责告知用户。
+    BUSY = 3,
 };
 
 enum class OpTy : uint32_t {
@@ -35,6 +38,8 @@ OpTy OpTyFromStr(const std::string &type);
 // NOTE carefully tweak those default values
 struct OpConfig {
     std::string uri = std::string(VIRTRUST_DEFAULT_URI);
+    // 仅 Create 使用完整的主命令候选顺序；其他操作沿用 uri 的最后值行为。
+    std::vector<std::string> uriCandidates;
     bool enableExec = true;
 };
 

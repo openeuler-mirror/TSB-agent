@@ -23,6 +23,16 @@ ConnCtx::~ConnCtx()
 
 bool ConnCtx::Connect()
 {
+    // 连接成功后不得覆盖原句柄，否则旧连接无法由析构函数关闭。
+    if (conn_ != nullptr) {
+        VIRTRUST_LOG_ERROR("libvirt connection is already established.");
+        return false;
+    }
+    if (uri_.empty()) {
+        // 空字符串会让 libvirt 自行选择默认目标，与项目配置的默认 URI 不等价。
+        VIRTRUST_LOG_ERROR("libvirt connection URI is empty.");
+        return false;
+    }
     conn_ = Libvirt::GetInstance().virConnectOpen(uri_.data());
     if (conn_ == nullptr) {
         VIRTRUST_LOG_ERROR("virConnectOpen of uri failed, a nullptr ConnCtx has been created.");
@@ -33,7 +43,8 @@ bool ConnCtx::Connect()
 
 bool ConnCtx::SetUri(std::string uri)
 {
-    if (uri_.empty() || uri.size() > URI_MAX_LENGTH) {
+    // URI 仅能在打开连接前配置；已连接时改字符串不会改变 libvirt 句柄的目标。
+    if (conn_ != nullptr || uri.empty() || uri.size() > URI_MAX_LENGTH) {
         return false;
     }
     uri_ = uri;

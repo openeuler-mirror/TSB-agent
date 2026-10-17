@@ -10,6 +10,11 @@
 #include "virtrust/api/defines.h"
 
 namespace virtrust {
+// 调用方必须保持传入的 ConnCtx 及其 unique_ptr 在整个同步 API 调用期间有效，
+// 包括等待节点准入和旧业务锁的时间；不得在其他线程并发 reset、移动或销毁。
+// 普通变更入口（Create/Destroy/Start/Undefine）要求 root，包括 only-tsb 分支。
+// 不要求守护进程已启动；节点准入竞争返回 BUSY，权限或准入故障返回 ERROR。
+// 调用方应以 rc != OK 判断失败；普通操作之间仍等待旧业务锁，不保证迁移公平性。
 /**
  * 创建虚拟机
  * @param conn 连接参数
