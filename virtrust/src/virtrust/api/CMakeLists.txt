@@ -15,13 +15,16 @@ if(BUILD_TEST AND ENABLE_MOCK_4_FUZZ)
     ${CMAKE_BINARY_DIR}/src/virtrust)
   target_link_libraries(domain-admission-test-obj PRIVATE virtrust-shared Deps::gtest Deps::secure_c)
   target_compile_definitions(domain-admission-test-obj PRIVATE VIRTRUST_REAL_FILE_LOCK_TEST)
+  add_virtrust_test_if(domain_admission_test)
   set(VIRTRUST_ADMISSION_TEST_WRAP_OPTIONS
     "LINKER:--wrap=_ZN8virtrust13NodeAdmission10TryAcquireENS_13AdmissionKindERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEEj"
     "LINKER:--wrap=open" "LINKER:--wrap=GetVRoots" "LINKER:--wrap=StartVRoot"
     "LINKER:--wrap=StopVRoot" "LINKER:--wrap=RemoveVRoot" CACHE INTERNAL "Task 4 test wrappers")
-  target_link_libraries(domain_test PRIVATE domain-admission-test-obj)
-  target_link_options(domain_test PRIVATE ${VIRTRUST_ADMISSION_TEST_WRAP_OPTIONS})
-  set_tests_properties(domain_test PROPERTIES TIMEOUT 30)
+  foreach(test_name domain_test domain_admission_test)
+    target_link_libraries(${test_name} PRIVATE domain-admission-test-obj)
+    target_link_options(${test_name} PRIVATE ${VIRTRUST_ADMISSION_TEST_WRAP_OPTIONS})
+    set_tests_properties(${test_name} PROPERTIES TIMEOUT 30)
+  endforeach()
 endif()
 
 set(VIRTRUST_SOURCE_FILES
