@@ -9,6 +9,8 @@
 #include <unistd.h>
 
 #include <filesystem>
+#include <algorithm>
+#include <exception>
 #include <future>
 #include <unordered_set>
 
@@ -18,8 +20,14 @@
 #include "virtrust-sh/defines.h"
 #include "virtrust/api/define_private.h"
 #include "virtrust/api/defines.h"
+#include "virtrust/api/create_connection_args.h"
+#ifdef VIRTRUST_REAL_FILE_LOCK_TEST
+// 测试对象使用独立类型名，避免与 mock 共享库中的同名 FileLock 构成 ODR 冲突。
+#define FileLock AdmissionTestFileLock
+#endif
 #include "virtrust/api/file_lock.h"
 #include "virtrust/base/logger.h"
+#include "virtrust/base/node_admission.h"
 #include "virtrust/crypto/sm3.h"
 #include "virtrust/dllib/libvirt.h"
 #include "virtrust/link/grpc_client.h"
@@ -41,6 +49,41 @@ namespace {
 constexpr std::string_view VIRT_INSTALL_ARG_NO_AUTO_CONSOLE = "--noautoconsole";
 constexpr std::string_view VIRT_INSTALL_ARG_NO_REBOOT = "--noreboot";
 constexpr std::string_view VIRT_INSTALL_ARG_CONNECT = "--connect";
+
+// 诊断尽力记录；日志格式化或回调失败不能改写已经确定的准入结果。
+void LogAdmissionFailureNoThrow(const char *operation, const char *detail) noexcept
+{
+    try {
+        VIRTRUST_LOG_ERROR("|{}|Admission|{}", operation, detail);
+    } catch (...) {
+        try {
+            Logger::Instance()->Log(LogLevel::ERROR, "Node admission failed; detailed diagnostics unavailable.");
+        } catch (...) {
+            // 日志设施持续失败时仍保留原来的失败分类。
+        }
+    }
+}
+
+// 令牌由外层业务入口持有；这里只捕获申请阶段异常，不吞掉后续业务异常。
+VirtrustRc AcquireOrdinaryAdmission(NodeAdmission &admission, const char *operation) noexcept
+{
+    LockOutcome outcome;
+    try {
+        // 生产策略固定为 root 和 /run/virtrust，不依赖守护进程已启动。
+        outcome = admission.TryAcquire(AdmissionKind::OrdinaryMutation);
+    } catch (const std::exception &error) {
+        LogAdmissionFailureNoThrow(operation, error.what());
+        return VirtrustRc::ERROR;
+    } catch (...) {
+        LogAdmissionFailureNoThrow(operation, "Unexpected exception while acquiring node admission");
+        return VirtrustRc::ERROR;
+    }
+    if (outcome == LockOutcome::Acquired) {
+        return VirtrustRc::OK;
+    }
+    LogAdmissionFailureNoThrow(operation, admission.LastError().c_str());
+    return outcome == LockOutcome::Busy ? VirtrustRc::BUSY : VirtrustRc::ERROR;
+}
 
 inline std::string GetNameStr(const virDomainPtr domian)
 {
@@ -358,24 +401,10 @@ VirtrustRc CheckCreateDomainName(const std::string &arg, std::string &domainName
     return VirtrustRc::OK;
 }
 
-void GetConnectArgs(const std::string &arg, std::string &value, size_t i, const std::vector<std::string> &args)
+// 只整理非连接业务参数；连接选项已由共用解析器移除并在调用方统一插入。
+VirtrustRc ParseCreateArgs(const std::vector<std::string> &args, std::vector<std::string> &execArgs,
+                           std::string &domainName, bool &allowStoreMeasurements)
 {
-    // 处理--connect ***
-    if (arg == "--connect" && i + 1 < args.size() && !args[i + 1].empty() && args[i + 1].front() != '-') {
-        value = args[i + 1];
-    }
-    // 处理--connect=***
-    bool isLongContains = arg.length() > 10 && arg.substr(0, 10) == "--connect="; // 10是--connect=的长度
-    if (isLongContains) {
-        value = arg.substr(arg.find('=') + 1);
-    }
-}
-
-VirtrustRc ValidateAndPrepareArgs(const std::vector<std::string> &args, std::vector<std::string> &execArgs,
-                                  std::string &domainName, bool &allowStoreMeasurements,
-                                  const std::unique_ptr<ConnCtx> &conn)
-{
-    std::string connectArgs;
     for (size_t i = 0; i < args.size(); ++i) {
         const auto &arg = args[i];
         if (StartsWithIgnoreSpaces(arg, ALLOW_STORE_MEASUREMENTS)) {
@@ -393,22 +422,16 @@ VirtrustRc ValidateAndPrepareArgs(const std::vector<std::string> &args, std::vec
         if (CheckCreateDomainName(arg, domainName, i, args) != VirtrustRc::OK) {
             return VirtrustRc::ERROR;
         }
-        (void)GetConnectArgs(arg, connectArgs, i, args);
         execArgs.push_back(arg.data());
     }
-    execArgs.push_back(std::string(VIRT_INSTALL_ARG_NO_AUTO_CONSOLE));
-    execArgs.push_back(std::string(VIRT_INSTALL_ARG_NO_REBOOT));
+    // 固定选项位于参数终止符之前，避免被 virt-install 当作普通位置参数。
+    const auto optionEnd = std::find(execArgs.begin(), execArgs.end(), "--");
+    execArgs.insert(optionEnd,
+        {std::string(VIRT_INSTALL_ARG_NO_AUTO_CONSOLE), std::string(VIRT_INSTALL_ARG_NO_REBOOT)});
     if (domainName.empty()) {
         VIRTRUST_LOG_ERROR("|DomainCreate|END|returnF||domain name must be given.");
         return VirtrustRc::ERROR;
     }
-    if (connectArgs.empty()) {
-        execArgs.push_back(std::string(VIRT_INSTALL_ARG_CONNECT));
-        execArgs.push_back(conn->GetUri());
-    } else {
-        conn->SetUri(connectArgs);
-    }
-
     return VirtrustRc::OK;
 }
 
@@ -702,24 +725,49 @@ VirtrustRc DomainCreate(const std::unique_ptr<ConnCtx> &conn, const std::vector<
         return VirtrustRc::ERROR;
     }
 
-    // Check whether the number and length of parameters exceed the threshold
+    // 参数数量和长度先于准入检查，避免无效请求占用节点资格。
     if (CheckCreateArgs(args) != VirtrustRc::OK) {
         return VirtrustRc::ERROR;
     }
 
+    // CLI 已选定 URI，直接 API 可能携带多个原始连接选项；两者都由本层核对句柄绑定 URI。
+    const auto connectionArgs = ParseCreateConnectionArgs(args);
+    // 显式连接参数不得与已打开句柄的 URI 冲突，防止父进程与子进程操作不同目标。
+    if (conn->Get() == nullptr || !IsUsableConnectionCandidate(conn->GetUri())) {
+        VIRTRUST_LOG_ERROR("DomainCreate requires an established connection with a valid URI.");
+        return VirtrustRc::ERROR;
+    }
+    // 直接 API 不负责连接回退；所有显式候选必须与已建连接的 URI 字符串完全相同。
+    for (const auto &candidate : connectionArgs.candidates) {
+        if (!IsUsableConnectionCandidate(candidate) || candidate != conn->GetUri()) {
+            VIRTRUST_LOG_ERROR("Create connection URI does not match the established connection.");
+            return VirtrustRc::ERROR;
+        }
+    }
+    std::vector<std::string> execArgsStr;
+    execArgsStr.reserve(connectionArgs.argsWithoutConnection.size() + 4);
+    std::string domainName;
+    bool allowStoreMeasurements = false;
+    // 参数及已建连接的一致性先于准入检查；可信资源状态仍在两层锁内处理。
+    if (ParseCreateArgs(connectionArgs.argsWithoutConnection, execArgsStr, domainName, allowStoreMeasurements) !=
+        VirtrustRc::OK) {
+        return VirtrustRc::ERROR;
+    }
+    // 原始连接选项已被剔除；统一插入唯一有效选项，并置于参数终止符之前。
+    const auto optionEnd = std::find(execArgsStr.begin(), execArgsStr.end(), "--");
+    execArgsStr.insert(optionEnd, {std::string(VIRT_INSTALL_ARG_CONNECT), conn->GetUri()});
+
+    // 先持共享准入再等待旧业务锁；后声明的旧锁先释放，准入覆盖业务及局部资源清理。
+    NodeAdmission admission;
+    const auto admissionRc = AcquireOrdinaryAdmission(admission, "DomainCreate");
+    if (admissionRc != VirtrustRc::OK) {
+        return admissionRc;
+    }
     FileLock fileLock(LOCK_FILE);
     if (!fileLock.IsLocked()) {
         return VirtrustRc::ERROR;
     }
     if (CheckMaxDomainCount() != VirtrustRc::OK) {
-        return VirtrustRc::ERROR;
-    }
-
-    std::vector<std::string> execArgsStr;
-    execArgsStr.reserve(args.size() + 2); // +2 for --noautoconsole, --noreboot
-    std::string domainName;
-    bool allowStoreMeasurements = false;
-    if (ValidateAndPrepareArgs(args, execArgsStr, domainName, allowStoreMeasurements, conn) != VirtrustRc::OK) {
         return VirtrustRc::ERROR;
     }
     // 为了可拓展性，保留allowStoreMeasurements选项; 当前固定为false，创建虚机时不采集基线值
@@ -738,7 +786,7 @@ VirtrustRc DomainCreate(const std::unique_ptr<ConnCtx> &conn, const std::vector<
     VIRTRUST_LOG_INFO("|DomainCreate|RUNNING|||Execute cmd: {},allowStoreMeasurements:{}", argStr,
                       allowStoreMeasurements);
 
-#ifdef VIRTRUST_MOCK
+#if defined(VIRTRUST_MOCK) && !defined(VIRTRUST_API_FORK_TEST)
     // Fuzz模式下跳过真实的fork/exec，直接模拟成功
     VIRTRUST_LOG_INFO("|DomainCreate|FUZZ_MODE|||Skipping real virt-install execution");
     return CreateDomainAndVRoot(conn, domainName, allowStoreMeasurements);
@@ -748,14 +796,32 @@ VirtrustRc DomainCreate(const std::unique_ptr<ConnCtx> &conn, const std::vector<
         VIRTRUST_LOG_ERROR("|DomainCreate|END|returnF||Failed to create fork, msg:{}", strerror(errno));
         return VirtrustRc::ERROR;
     } else if (pid == 0) {
+        // 只关闭子进程继承的准入描述符副本，父进程继续持锁等待创建完成。
+        admission.Release();
         if (execv(execArgs[0], execArgs.data()) == -1) {
-
             VIRTRUST_LOG_ERROR("|DomainCreate|END|returnF||Failed to execute cmd:{}, msg: {}", argStr, strerror(errno));
-            _exit(0);
+            // 外部创建程序未能启动，非零退出使父进程停止后续可信资源创建。
+            _exit(127);
         }
     } else {
-        int status;
-        waitpid(pid, &status, 0);
+        int status = 0;
+        pid_t waited;
+        // 信号中断不代表创建结束；保持两层锁并继续等待同一子进程。
+        do {
+            waited = waitpid(pid, &status, 0);
+        } while (waited == -1 && errno == EINTR);
+        if (waited == -1) {
+            const int waitError = errno;
+            VIRTRUST_LOG_ERROR("|DomainCreate|END|returnF||Failed to wait for child pid: {}, errno: {}, msg: {}",
+                               pid, waitError, strerror(waitError));
+            return VirtrustRc::ERROR;
+        }
+        // 仅成功回收目标子进程后解释 status，避免将无效状态误当作创建成功。
+        if (waited != pid) {
+            VIRTRUST_LOG_ERROR("|DomainCreate|END|returnF||Unexpected wait result for child pid: {}, result: {}",
+                               pid, waited);
+            return VirtrustRc::ERROR;
+        }
         if (WIFEXITED(status)) {
             int exitStatus = WEXITSTATUS(status);
             VIRTRUST_LOG_INFO("|DomainCreate|||Child process exited with status: {}", exitStatus);
@@ -785,11 +851,7 @@ VirtrustRc DomainDestroy(const std::unique_ptr<ConnCtx> &conn, const std::string
         VIRTRUST_LOG_ERROR("|DomainDestroy|END|returnF|| ConnCtx is nullptr.");
         return VirtrustRc::ERROR;
     }
-    FileLock fileLock(LOCK_FILE);
-    if (!fileLock.IsLocked()) {
-        return VirtrustRc::ERROR;
-    }
-
+    // 纯参数错误优先于准入竞争；only-tsb 分支沿用忽略 flags 的旧契约。
     if (isOnlyTsb) {
         if (domainName.size() != 36) { // UUID长度为36
             VIRTRUST_LOG_ERROR("|DomainDestroy|END|returnF||invalid domain UUID: "
@@ -797,6 +859,22 @@ VirtrustRc DomainDestroy(const std::unique_ptr<ConnCtx> &conn, const std::string
                                domainName);
             return VirtrustRc::ERROR;
         }
+    } else if (flags != DOMAIN_DESTROY_NONE) {
+        VIRTRUST_LOG_ERROR("flags only support: {}", static_cast<int>(DOMAIN_DESTROY_NONE));
+        return VirtrustRc::ERROR;
+    }
+    // only-tsb 与普通分支共用准入；等待旧业务锁期间也保留共享资格。
+    NodeAdmission admission;
+    const auto admissionRc = AcquireOrdinaryAdmission(admission, "DomainDestroy");
+    if (admissionRc != VirtrustRc::OK) {
+        return admissionRc;
+    }
+    FileLock fileLock(LOCK_FILE);
+    if (!fileLock.IsLocked()) {
+        return VirtrustRc::ERROR;
+    }
+
+    if (isOnlyTsb) {
         std::string uuidStr = domainName;
         if (StopVRoot(uuidStr.data()) != 0) {
             VIRTRUST_LOG_ERROR("stop vRoot failed, uuid: {}", uuidStr);
@@ -806,10 +884,6 @@ VirtrustRc DomainDestroy(const std::unique_ptr<ConnCtx> &conn, const std::string
         return VirtrustRc::OK;
     }
     auto &libvirt = Libvirt::GetInstance();
-    if (flags != DOMAIN_DESTROY_NONE) {
-        VIRTRUST_LOG_ERROR("flags only support: {}", static_cast<int>(DOMAIN_DESTROY_NONE));
-        return VirtrustRc::ERROR;
-    }
     auto domain = std::make_unique<DomainCtx>(conn, domainName);
     if (domain->Get() == nullptr) {
         VIRTRUST_LOG_ERROR("Failed to find domain: {}", domainName);
@@ -977,32 +1051,36 @@ VirtrustRc DomainStart(const std::unique_ptr<ConnCtx> &conn, const std::string &
         VIRTRUST_LOG_ERROR("|DomainStart|END|returnF|| ConnCtx is nullptr.");
         return VirtrustRc::ERROR;
     }
-    FileLock fileLock(LOCK_FILE);
-    if (!fileLock.IsLocked()) {
+    // only-tsb 只校验 UUID 长度，普通分支只接受原有的 flags 值。
+    if (isOnlyTsb) {
+        if (domainName.size() != 36) { // UUID长度为36
+            VIRTRUST_LOG_DEBUG("|DomainStart|END|returnF||invalid domain UUID: {}", domainName);
+            return VirtrustRc::ERROR;
+        }
+    } else if (flags != DOMAIN_START_NONE) {
+        VIRTRUST_LOG_ERROR("flags only support: {}", static_cast<unsigned int>(DOMAIN_START_NONE));
         return VirtrustRc::ERROR;
     }
-    if (conn == nullptr) {
-        VIRTRUST_LOG_ERROR("|DomainStart|END|returnF||conn is nullptr");
+    // 准入先于旧锁构造，覆盖异步可信资源启动及其结果等待和清理。
+    NodeAdmission admission;
+    const auto admissionRc = AcquireOrdinaryAdmission(admission, "DomainStart");
+    if (admissionRc != VirtrustRc::OK) {
+        return admissionRc;
+    }
+    FileLock fileLock(LOCK_FILE);
+    if (!fileLock.IsLocked()) {
         return VirtrustRc::ERROR;
     }
     // 如果带--only-tsb仅更新tsb资源
     if (isOnlyTsb) {
         std::string uuidStr = domainName;
         VIRTRUST_LOG_INFO("only update tsb resource");
-        if (domainName.size() != 36) { // UUIDchang长度为36
-            VIRTRUST_LOG_DEBUG("|DomainStart|END|returnF||invalid domain UUID: {}", domainName);
-            return VirtrustRc::ERROR;
-        }
         if (StartVRoot(uuidStr.data()) != 0) {
             VIRTRUST_LOG_DEBUG("|DomainStart|END|returnF||start vRoot failed,UUID: {}", domainName);
             return VirtrustRc::ERROR;
         }
         VIRTRUST_LOG_DEBUG("|DomainStart||END|returnS|start domainName: {} success", domainName);
         return VirtrustRc::OK;
-    }
-    if (flags != DOMAIN_START_NONE) {
-        VIRTRUST_LOG_ERROR("flags only support: {}", static_cast<unsigned int>(DOMAIN_START_NONE));
-        return VirtrustRc::ERROR;
     }
     auto domain = std::make_unique<DomainCtx>(conn, domainName);
     if (domain->Get() == nullptr) {
@@ -1054,21 +1132,37 @@ VirtrustRc DomainUndefine(const std::unique_ptr<ConnCtx> &conn, const std::strin
         VIRTRUST_LOG_ERROR("|DomainUndefine|END|returnF|| ConnCtx is nullptr.");
         return VirtrustRc::ERROR;
     }
+    // only-tsb 保留深层防御性检查；普通分支的名称与 flags 错误先于准入返回。
+    if (isOnlyTsb) {
+        if (domainName.size() != 36) { // UUID长度为36
+            VIRTRUST_LOG_ERROR("|DomainUndefine UndefineTsbResource|END|returnF||invalid domain UUID: "
+                               "{}",
+                               domainName);
+            return VirtrustRc::ERROR;
+        }
+    } else {
+        if (domainName.empty() || domainName.size() > MAX_NAME_LENGTH) {
+            VIRTRUST_LOG_ERROR("DomainUndefine|END|returnF||domain name length is [1, {}]", MAX_NAME_LENGTH);
+            return VirtrustRc::ERROR;
+        }
+        if (flags != DOMAIN_UNDEFINE_NVRAM && flags != DOMAIN_UNDEFINE_KEEP_NVRAM && flags != 0) {
+            VIRTRUST_LOG_ERROR("DomainUndefine|END|returnF||flags only suppport:0,{},and {}",
+                               static_cast<int>(DOMAIN_UNDEFINE_NVRAM), static_cast<int>(DOMAIN_UNDEFINE_KEEP_NVRAM));
+            return VirtrustRc::ERROR;
+        }
+    }
+    // 共享资格覆盖普通删除和 only-tsb 删除，所有返回路径由 RAII 释放。
+    NodeAdmission admission;
+    const auto admissionRc = AcquireOrdinaryAdmission(admission, "DomainUndefine");
+    if (admissionRc != VirtrustRc::OK) {
+        return admissionRc;
+    }
     FileLock fileLock(LOCK_FILE);
     if (!fileLock.IsLocked()) {
         return VirtrustRc::ERROR;
     }
     if (isOnlyTsb) {
         return UndefineTsbResource(domainName);
-    }
-    if (domainName.empty() || domainName.size() > MAX_NAME_LENGTH) {
-        VIRTRUST_LOG_ERROR("DomainUndefine|END|returnF||domain name length is [1, {}]", MAX_NAME_LENGTH);
-        return VirtrustRc::ERROR;
-    }
-    if (flags != DOMAIN_UNDEFINE_NVRAM && flags != DOMAIN_UNDEFINE_KEEP_NVRAM && flags != 0) {
-        VIRTRUST_LOG_ERROR("DomainUndefine|END|returnF||flags only suppport:0,{},and {}",
-                           static_cast<int>(DOMAIN_UNDEFINE_NVRAM), static_cast<int>(DOMAIN_UNDEFINE_KEEP_NVRAM));
-        return VirtrustRc::ERROR;
     }
     auto &libvirt = Libvirt::GetInstance();
 
@@ -1109,3 +1203,7 @@ VirtrustRc DomainUndefine(const std::unique_ptr<ConnCtx> &conn, const std::strin
     return VirtrustRc::OK;
 }
 } // namespace virtrust
+
+#ifdef VIRTRUST_REAL_FILE_LOCK_TEST
+#undef FileLock
+#endif

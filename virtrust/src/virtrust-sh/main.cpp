@@ -4,6 +4,7 @@
 #include <unistd.h>
 
 #include <array>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <string>
@@ -75,6 +76,11 @@ int ProcessOp(int argc, char **argv, const virtrust::OpConfig &config)
     // Execute subcommand, if enabled
     if (op->GetConfig().enableExec) {
         rc = op->Exec();
+        if (rc == virtrust::OpRc::BUSY) {
+            // 准入阶段已拒绝业务，本次命令失败；不自动重试。
+            fmt::print(stderr, "Node is busy. The requested operation was not started.\n");
+            return 1;
+        }
         if (rc != virtrust::OpRc::OK) {
             fmt::print("\nCommand execution failed.\nSee log at: {}\n", GetLogPath());
             return 1;
@@ -100,7 +106,9 @@ int ProcessArgs(int argc, char **argv)
     while ((arg = getopt_long(argc, argv, "+c:dhv", opt.data(), &longindex)) != -1) {
         switch (arg) {
             case 'c':
+                // 旧命令继续使用最后一个 URI；Create 另保留主命令选项的原始出现顺序。
                 op_config.uri = optarg;
+                op_config.uriCandidates.emplace_back(optarg);
                 break;
             case 'd':
                 virtrust::Logger::Instance()->SetDisplayLogLevel(virtrust::LogLevel::DEBUG);

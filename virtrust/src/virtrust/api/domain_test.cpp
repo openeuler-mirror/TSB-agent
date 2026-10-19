@@ -317,23 +317,24 @@ TEST(DomainTest, DomainListEdgeCases)
 // ConnCtx Test Cases
 TEST(DomainTest, ConnCtxBasicFunctionality)
 {
-    // Test ConnCtx construction
-    auto &conn = GetGlobalConn();
-    EXPECT_TRUE(conn->CheckOk());
-
-    EXPECT_FALSE(conn->GetUri().empty());
-
-    // Test SetUri with valid URIs
-    EXPECT_EQ(true, conn->SetUri("qemu:///system"));
-    EXPECT_EQ(conn->GetUri(), "qemu:///system");
-
-    EXPECT_EQ(true, conn->SetUri("qemu:///session"));
-    EXPECT_EQ(conn->GetUri(), "qemu:///session");
+    ConnCtx conn;
+    EXPECT_FALSE(conn.GetUri().empty());
+    EXPECT_TRUE(conn.SetUri("qemu:///system"));
+    EXPECT_EQ(conn.GetUri(), "qemu:///system");
+    ASSERT_TRUE(conn.Connect());
+    auto *const openedConnection = conn.Get();
+    // 连接成功后，配置字符串不得与已打开的句柄分离。
+    EXPECT_FALSE(conn.SetUri("qemu:///session"));
+    EXPECT_EQ(conn.GetUri(), "qemu:///system");
+    EXPECT_EQ(conn.Get(), openedConnection);
+    // 重复连接不能覆盖原句柄。
+    EXPECT_FALSE(conn.Connect());
+    EXPECT_EQ(conn.Get(), openedConnection);
 }
 
 TEST(DomainTest, ConnCtxEdgeCases)
 {
-    auto &conn = GetGlobalConn();
+    ConnCtx conn;
 
     // Test with various URI formats
     std::vector<std::string> testUris = {
@@ -345,13 +346,13 @@ TEST(DomainTest, ConnCtxEdgeCases)
     };
 
     for (const auto& uri : testUris) {
-        EXPECT_EQ(true, conn->SetUri(uri)) << "Failed to set URI: " << uri;
-        EXPECT_EQ(conn->GetUri(), uri);
+        EXPECT_TRUE(conn.SetUri(uri)) << "Failed to set URI: " << uri;
+        EXPECT_EQ(conn.GetUri(), uri);
     }
 
-    // Test with empty URI
-    EXPECT_EQ(true, conn->SetUri(""));
-    EXPECT_EQ(conn->GetUri(), "");
+    // 显式空 URI 不应触发 libvirt 自身的隐式缺省目标选择。
+    EXPECT_FALSE(conn.SetUri(""));
+    EXPECT_EQ(conn.GetUri(), testUris.back());
 }
 
 // Constants and Flags Test Cases

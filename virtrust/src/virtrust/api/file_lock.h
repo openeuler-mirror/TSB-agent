@@ -17,7 +17,8 @@ namespace virtrust {
 class FileLock {
 public:
     FileLock(const char *fileName)
-#ifdef VIRTRUST_MOCK
+// 准入集成测试即使使用模拟业务依赖，也必须执行真实的旧业务锁。
+#if defined(VIRTRUST_MOCK) && !defined(VIRTRUST_REAL_FILE_LOCK_TEST)
         : fd_(0) // Mock文件描述符，总是成功
     {
         // Fuzz模式下跳过所有文件操作，直接返回成功
@@ -47,7 +48,7 @@ public:
 
     ~FileLock()
     {
-#ifdef VIRTRUST_MOCK
+#if defined(VIRTRUST_MOCK) && !defined(VIRTRUST_REAL_FILE_LOCK_TEST)
         // Fuzz模式下不需要做任何清理
         (void)0;
 #else

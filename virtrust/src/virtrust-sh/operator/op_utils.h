@@ -23,6 +23,8 @@ inline OpRc ParseVirtrustRc(VirtrustRc rc)
             return OpRc::OK;
         case VirtrustRc::ERROR:
             return OpRc::ERROR;
+        case VirtrustRc::BUSY:
+            return OpRc::BUSY;
         default:
             VIRTRUST_LOG_ERROR("Unknown virtrust return code: {}", static_cast<int>(rc));
             return OpRc::ERROR;

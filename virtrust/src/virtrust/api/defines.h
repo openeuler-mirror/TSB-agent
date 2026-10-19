@@ -12,7 +12,14 @@ constexpr std::string_view VIRTRUST_DEFAULT_URI = "qemu:///session";
 // 本地客户端与守护进程使用同一固定端点；父目录由守护进程按 root 专用策略管理。
 constexpr std::string_view UDS_PATH = "/run/virtrust/rpc.sock";
 
-enum class VirtrustRc : uint32_t { OK = 0, ERROR = 1, CHECK_FAILED = 2, INCONSISTENT_RESOURCE = 3 };
+enum class VirtrustRc : uint32_t {
+    OK = 0,
+    ERROR = 1,
+    CHECK_FAILED = 2,
+    INCONSISTENT_RESOURCE = 3,
+    // 节点准入被其他操作占用，本次变更业务尚未开始；不在接口内部自动重试。
+    BUSY = 4,
+};
 
 enum DomainUndefineFlags {
     DOMAIN_UNDEFINE_NVRAM = (1 << 2),
