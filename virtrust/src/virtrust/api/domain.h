@@ -42,6 +42,8 @@ VirtrustRc DomainDestroy(const std::unique_ptr<ConnCtx> &conn, const std::string
  * @param flags 目前仅支持MIGRATE_UNDEFINE_SOURCE，删除源端虚拟机
  * @param domainName 虚拟机名称
  * @param destUri 目的端地址 格式为<protocol>://<hostip>/<path> 如qemu+tls://7.7.7.7/system
+ * API 预检查仅用于构造请求；源端守护进程持独占资格后会复核虚机状态和 UUID。
+ * 守护进程准入竞争返回 BUSY；API 不跨 UDS 调用持旧业务锁。
  * @return VirtrustRc
  */
 VirtrustRc DomainMigrate(const std::unique_ptr<ConnCtx> &conn, const std::string &domainName,

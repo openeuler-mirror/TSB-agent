@@ -30,6 +30,22 @@ if(BUILD_TEST)
 endif()
 add_virtrust_test_if(grpc_server_test)
 add_virtrust_test_if(grpc_server_fault_test)
+if(BUILD_TEST AND ENABLE_MOCK_4_FUZZ)
+  # 服务入口单独编译，使链接包装仅影响定向测试，不改变生产共享库。
+  add_library(source-migration-admission-test-obj OBJECT migration_service_impl.cpp)
+  target_include_directories(source-migration-admission-test-obj PRIVATE
+    ${PROJECT_SOURCE_DIR}/src ${CMAKE_DEPS_INCLUDEDIR} ${CMAKE_BINARY_DIR}/src
+    ${CMAKE_BINARY_DIR}/src/virtrust)
+  target_link_libraries(source-migration-admission-test-obj PRIVATE virtrust-shared Deps::gtest Deps::secure_c)
+  add_virtrust_test_if(source_migration_admission_test)
+  target_link_libraries(source_migration_admission_test PRIVATE
+    source-migration-admission-test-obj grpc++ grpc gpr protobuf)
+  target_link_options(source_migration_admission_test PRIVATE
+    "LINKER:--wrap=_ZN8virtrust13NodeAdmission10TryAcquireENS_13AdmissionKindERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEEj"
+    "LINKER:--wrap=_ZN8virtrust16MigrationSession5StartEv"
+    "LINKER:--wrap=_ZN8virtrust16MigrationSession7CleanupEv")
+  set_tests_properties(source_migration_admission_test PROPERTIES TIMEOUT 30)
+endif()
 if(BUILD_TEST)
   set_tests_properties(grpc_server_test grpc_server_fault_test PROPERTIES TIMEOUT 30)
   # 测试直接调用 gRPC 头文件接口，须显式链接其内联实现使用的底层库。

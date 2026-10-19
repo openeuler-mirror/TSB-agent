@@ -5,14 +5,19 @@
 #include "virtrust/link/migration_service_impl.h"
 
 #include <memory>
+#include <exception>
 #include <regex>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include "libvirtrustd/defines.h"
 #include "tsb_agent/tsb_agent.h"
 
+#include "virtrust/api/domain.h"
 #include "virtrust/base/logger.h"
+#include "virtrust/base/node_admission.h"
+#include "virtrust/dllib/libvirt.h"
 #include "virtrust/link/defines.h"
 #include "virtrust/link/grpc_client.h"
 #include "virtrust/link/migration_session.h"
@@ -38,6 +43,46 @@ std::string ExtractSingleIP(const std::string &str)
         return "";
     }
     return ips[0];
+}
+
+// API 的查询只用于构造请求；守护进程取得独占资格后再次核验，避免等待 UDS 时虚机已变化。
+bool CheckSourceDomain(const protos::DomainMigraterRequest &request)
+{
+    auto conn = std::make_unique<ConnCtx>();
+    if (!conn->SetUri(request.localuri()) || !conn->Connect()) {
+        VIRTRUST_LOG_ERROR("|DomainMigrate|Precheck|Failed to connect to source URI: {}", request.localuri());
+        return false;
+    }
+    std::unordered_map<std::string, DomainInfo> domains;
+    if (DomainList(conn, LIST_DOMAINS_ACTIVE | LIST_DOMAINS_INACTIVE, domains, false) != VirtrustRc::OK) {
+        VIRTRUST_LOG_ERROR("|DomainMigrate|Precheck|Failed to list source domains");
+        return false;
+    }
+    const auto it = domains.find(request.uuid());
+    if (it == domains.end() || it->second.domainName != request.domainname() ||
+        it->second.state != VIR_DOMAIN_SHUTOFF) {
+        VIRTRUST_LOG_ERROR("|DomainMigrate|Precheck|Source domain changed: name={}, uuid={}",
+                           request.domainname(), request.uuid());
+        return false;
+    }
+    return true;
+}
+
+// Cleanup 异常时至少撤销 manager 中的会话登记，避免释放节点资格后仍残留同 UUID 会话。
+void CleanupSourceSessionNoThrow(const std::shared_ptr<MigrationSession> &session, const std::string &uuid) noexcept
+{
+    if (!session) {
+        return;
+    }
+    try {
+        session->Cleanup();
+    } catch (...) {
+        try {
+            SessionManager::GetInstance().RemoveSession(uuid);
+        } catch (...) {
+            // 异常边界不能再向 gRPC 框架抛出；极端残留需由人工排查。
+        }
+    }
 }
 } // namespace
 
@@ -184,39 +229,84 @@ grpc::Status MigrationServiceImpl::DomainMigrate(grpc::ServerContext *context,
                                                  const protos::DomainMigraterRequest *request,
                                                  protos::DomainMigraterReply *response)
 {
-    VIRTRUST_LOG_DEBUG("|DomainMigrate|START||start handle uds request");
-    std::string destIp = ExtractSingleIP(request->desturi());
-    if (destIp.empty()) {
-        VIRTRUST_LOG_ERROR("|MigrationServiceImpl DomainMigrate|END|returnF|invalid ip, destUri is: {}",
-                           request->desturi());
-        response->set_result(1);
-        return grpc::Status::OK;
+    if (request == nullptr || response == nullptr) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "Migration request or reply is null");
     }
-    LinkConfig config = ConfigMgr::Instance().GetLinkConfig();
-    config.ip = destIp;
-    RpcClient client(config);
+    response->set_result(static_cast<uint32_t>(VirtrustRc::ERROR));
+    // 置于异常处理之外，确保异常路径清理会话时仍持有本节点独占资格。
+    NodeAdmission admission;
+    std::shared_ptr<MigrationSession> session;
+    try {
+        VIRTRUST_LOG_DEBUG("|DomainMigrate|START||start handle uds request");
+        // 独立校验 UDS 输入，防止调用方绕过 API 让本节点锁保护远端 libvirt 操作。
+        if (!IsLocalMigrationSourceUri(request->localuri())) {
+            VIRTRUST_LOG_ERROR("|DomainMigrate|SourceUri|Unsupported migration source URI: {}", request->localuri());
+            return grpc::Status::OK;
+        }
+        const std::string destIp = ExtractSingleIP(request->desturi());
+        if (destIp.empty()) {
+            VIRTRUST_LOG_ERROR("|MigrationServiceImpl DomainMigrate|END|returnF|invalid ip, destUri is: {}",
+                               request->desturi());
+            return grpc::Status::OK;
+        }
 
-    auto &mgr = SessionManager::GetInstance();
-    auto session = mgr.CreateSession(MigrationSession::Role::Initiator, request->uuid(), request->domainname(),
-                                     request->desturi(), request->localuri(), request->flags());
-    if (!session) {
-        response->set_result(1); // already exists or failed
-        return grpc::Status::OK;
-    }
-    // 初始化会话内的 RPC 客户端
-    session->SetRpcClient(std::make_unique<RpcClient>(config));
-    // 启动状态机（内部会依次调用 Prepare/Exchange/Start）
-    auto ret = session->Start();
-    session->Cleanup();
-    if (ret != MigrateSessionRc::OK) {
-        VIRTRUST_LOG_ERROR("|MigrationServiceImpl DomainMigrate|END|returnF|domain : {} migrate failed.",
-                           request->domainname());
-        response->set_result(1);
-        return grpc::Status::OK;
-    }
+        // 令牌由当前守护进程请求持有，直至源端状态机和 Cleanup 全部返回；不从 API 转移描述符。
+        const auto outcome = admission.TryAcquire(AdmissionKind::Migration);
+        if (outcome != LockOutcome::Acquired) {
+            response->set_result(static_cast<uint32_t>(outcome == LockOutcome::Busy ? VirtrustRc::BUSY
+                                                                                    : VirtrustRc::ERROR));
+            // 诊断失败不能把已经确定的 Busy 改写为通用 Error。
+            try {
+                VIRTRUST_LOG_ERROR("|DomainMigrate|Admission|{}", admission.LastError());
+            } catch (...) {
+            }
+            return grpc::Status::OK;
+        }
+        if (!CheckSourceDomain(*request)) {
+            return grpc::Status::OK;
+        }
 
-    response->set_result(0);
-    VIRTRUST_LOG_DEBUG("|DomainMigrate|END|returnS|");
+        LinkConfig config = ConfigMgr::Instance().GetLinkConfig();
+        config.ip = destIp;
+        auto &mgr = SessionManager::GetInstance();
+        session = mgr.CreateSession(MigrationSession::Role::Initiator, request->uuid(), request->domainname(),
+                                    request->desturi(), request->localuri(), request->flags());
+        if (!session) {
+            VIRTRUST_LOG_ERROR("|DomainMigrate|Session|Failed to create source session: uuid={}", request->uuid());
+            return grpc::Status::OK;
+        }
+        // 源端会话同步运行；先清理会话，再由 admission 析构释放独占资格。
+        session->SetRpcClient(std::make_unique<RpcClient>(config));
+        const auto result = session->Start();
+        session->Cleanup();
+        session.reset();
+        if (result != MigrateSessionRc::OK) {
+            VIRTRUST_LOG_ERROR("|MigrationServiceImpl DomainMigrate|END|returnF|domain : {} migrate failed.",
+                               request->domainname());
+            return grpc::Status::OK;
+        }
+        response->set_result(static_cast<uint32_t>(VirtrustRc::OK));
+        try {
+            VIRTRUST_LOG_DEBUG("|DomainMigrate|END|returnS|");
+        } catch (...) {
+            // 成功后的诊断失败不改变已经完成的迁移结果。
+        }
+    } catch (const std::exception &error) {
+        // 异常也须移除已创建的会话；独占资格随栈展开自动释放。
+        CleanupSourceSessionNoThrow(session, request->uuid());
+        response->set_result(static_cast<uint32_t>(VirtrustRc::ERROR));
+        try {
+            VIRTRUST_LOG_ERROR("|DomainMigrate|Exception|{}", error.what());
+        } catch (...) {
+        }
+    } catch (...) {
+        CleanupSourceSessionNoThrow(session, request->uuid());
+        response->set_result(static_cast<uint32_t>(VirtrustRc::ERROR));
+        try {
+            VIRTRUST_LOG_ERROR("|DomainMigrate|Exception|Unknown source migration failure");
+        } catch (...) {
+        }
+    }
     return grpc::Status::OK;
 }
 
