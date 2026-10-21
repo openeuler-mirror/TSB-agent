@@ -410,7 +410,6 @@ VirtrustRc ParseCreateArgs(const std::vector<std::string> &args, std::vector<std
         if (StartsWithIgnoreSpaces(arg, ALLOW_STORE_MEASUREMENTS)) {
             if (CheckAllowStoreMeasurements(arg)) {
                 allowStoreMeasurements = true;
-
             } else {
                 VIRTRUST_LOG_ERROR("|DomainCreate|END|returnF||--allow-store-"
                                    "measurements not set value");
@@ -979,13 +978,15 @@ VirtrustRc DomainMigrate(const std::unique_ptr<ConnCtx> &conn, const std::string
         VIRTRUST_LOG_ERROR("|DomainMigrate|END|returnF|| ConnCtx is nullptr.");
         return VirtrustRc::ERROR;
     }
-    FileLock fileLock(LOCK_FILE);
-    if (!fileLock.IsLocked()) {
+    // 源端查询和本地 UDS 请求必须对应同一个节点；连接 URI 仅允许明确的本机形式。
+    if (!IsLocalMigrationSourceUri(conn->GetUri())) {
+        VIRTRUST_LOG_ERROR("|DomainMigrate|SourceUri|Unsupported migration source URI: {}", conn->GetUri());
         return VirtrustRc::ERROR;
     }
-    // 命令行及 API 默认参数传入删除源端标志；此处补齐离线和目的端持久化标志。
+    // 源端守护进程持有迁移独占资格；API 不跨同步 UDS 调用持旧业务锁。
+    // 命令行及 API 默认参数传入删除源端标志；此处补齐离线和目的端持久化标志，离线迁移必须指定VIR_MIGRATE_PERSIST_DEST
     // 待后续迁移整改确认是否扩展当前唯一支持的标志组合。
-    flags |= VIR_MIGRATE_OFFLINE | VIR_MIGRATE_PERSIST_DEST; // 默认离线迁移 离线迁移必须指定VIR_MIGRATE_PERSIST_DEST
+    flags |= VIR_MIGRATE_OFFLINE | VIR_MIGRATE_PERSIST_DEST;
     if (flags != (VIR_MIGRATE_OFFLINE | VIR_MIGRATE_PERSIST_DEST | MIGRATE_UNDEFINE_SOURCE)) {
         VIRTRUST_LOG_ERROR("|DomainMigrate|END|returnF|invalid flags, only support {}",
                            static_cast<unsigned int>(MIGRATE_UNDEFINE_SOURCE));
@@ -1016,8 +1017,6 @@ VirtrustRc DomainMigrate(const std::unique_ptr<ConnCtx> &conn, const std::string
         return VirtrustRc::ERROR;
     }
 
-    auto domain = std::make_unique<DomainCtx>();
-
     LinkConfig config;
     config.udsPath = UDS_PATH;
     UdsClient client(config);
@@ -1032,6 +1031,15 @@ VirtrustRc DomainMigrate(const std::unique_ptr<ConnCtx> &conn, const std::string
     };
 
     auto retClient = client.DomainMigrate(migration_config);
+    if (retClient == static_cast<int32_t>(VirtrustRc::BUSY)) {
+        // 守护进程已给出 Busy；日志设施异常不能再把它改写为未捕获异常。
+        try {
+            VIRTRUST_LOG_ERROR("|DomainMigrate|Admission|Source node is busy: domainName={}", domainName);
+        } catch (...) {
+            LogAdmissionFailureNoThrow("DomainMigrate", "Source node is busy; detailed diagnostics unavailable");
+        }
+        return VirtrustRc::BUSY;
+    }
     if (retClient != 0) {
         VIRTRUST_LOG_ERROR("|DomainMigrate|END|returnF|DomainMigrate failed domainName: {}, retClient:{}", domainName,
                            retClient);

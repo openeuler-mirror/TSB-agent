@@ -26,6 +26,7 @@
 #include "virtrust/base/node_admission.h"
 #include "virtrust/base/logger.h"
 #include "virtrust/api/context.h"
+#include "virtrust/link/grpc_client.h"
 
 namespace virtrust::test {
 AdmissionTestState &AdmissionState()
@@ -234,6 +235,17 @@ extern "C" virtrust::LockOutcome WrappedAdmission(virtrust::NodeAdmission *self,
 }
 
 extern "C" int __real_open(const char *, int, ...);
+extern "C" int32_t RealMigrationRpc(virtrust::UdsClientMock *, const virtrust::MigrationConfig &)
+    asm("__real__ZN8virtrust13UdsClientMock13DomainMigrateERKNS_15MigrationConfigE");
+extern "C" int32_t WrappedMigrationRpc(virtrust::UdsClientMock *, const virtrust::MigrationConfig &)
+    asm("__wrap__ZN8virtrust13UdsClientMock13DomainMigrateERKNS_15MigrationConfigE");
+extern "C" int32_t WrappedMigrationRpc(virtrust::UdsClientMock *client, const virtrust::MigrationConfig &config)
+{
+    auto &state = virtrust::test::AdmissionState();
+    ++state.udsCalls;
+    return state.udsResultOverride == -999 ? RealMigrationRpc(client, config) : state.udsResultOverride;
+}
+
 extern "C" int __wrap_open(const char *path, int flags, ...)
 {
     mode_t mode = 0;

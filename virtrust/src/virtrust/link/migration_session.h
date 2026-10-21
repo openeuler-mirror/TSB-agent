@@ -14,6 +14,7 @@
 #include "tsb_agent/tsb_agent.h"
 
 #include "virtrust/api/context.h"
+#include "virtrust/base/node_admission.h"
 #include "virtrust/link/grpc_client.h"
 #include "virtrust/utils/async_timer.h"
 
@@ -34,7 +35,8 @@ public:
     enum class State { Init, WaitingKey, CertVerify, Transferring, Finished, Failed };
 
     MigrationSession(Role role, const std::string &uuid, const std::string &domainName,
-                     const std::string &destUri = "", const std::string &localUri = "", const unsigned int flags = 0);
+                     const std::string &destUri = "", const std::string &localUri = "", const unsigned int flags = 0,
+                     NodeAdmission admission = {});
 
     // 主动方起步
     MigrateSessionRc Start();
@@ -42,7 +44,7 @@ public:
     // 定时器触发时调用
     void OnTimeout(State stateWhenSet);
 
-    // 失败时调用：状态设置为失败，并进行清理
+    // 标记失败；源端按接收确认情况尝试通知目的端，最终清理由调用方收尾。
     void OnFail();
 
     // 让manager删掉自己
@@ -88,6 +90,9 @@ private:
     void StartTimerFor(State s);
 
     void CancelTimer();
+
+    // 定时器携带代数，避免旧回调在同一状态重新计时后误清理新状态。
+    void OnTimeoutForGeneration(State stateWhenSet, uint64_t generation);
 
     // 主动方要发的几步
     MigrateSessionRc SendMigrateRequest();
@@ -135,8 +140,16 @@ private:
     std::string localUri_;
     unsigned int flags_;
 
+    // 响应方跨 RPC 持有目的端独占资格；与状态、定时器和清理共用同一同步边界。
+    NodeAdmission admission_;
+    std::recursive_mutex operationMutex_;
+    uint64_t timerGeneration_ = 0;
+    bool cleanedUp_ = false;
+
     // 仅 Initiator 侧使用
     std::unique_ptr<RpcClient> rpcClient_;
+    // 记录本次 Prepare 已收到成功应答，阻止未确认接收时发送失败通知；不提供跨尝试身份校验。
+    bool destinationAccepted_ = false;
 
     std::atomic<bool> timerActive_{false};
 
@@ -159,13 +172,17 @@ public:
     // 创建并托管一个会话，调用方通过共享所有权保证使用期间对象存活
     std::shared_ptr<MigrationSession> CreateSession(MigrationSession::Role role, const std::string &uuid,
                                                     const std::string &domainName, const std::string &destUri,
-                                                    const std::string &localUri, const unsigned int flags);
+                                                    const std::string &localUri, const unsigned int flags,
+                                                    NodeAdmission admission = {});
 
     // 查找会话（比如 gRPC handler 用这个）
     std::shared_ptr<MigrationSession> GetSession(const std::string &uuid);
 
     // 会话结束时移除 manager 持有的引用；对象在最后一个使用者释放后销毁
     void RemoveSession(const std::string &uuid);
+
+    // 只删除仍指向本会话的登记，防止旧回调误删同 UUID 的新任务。
+    void RemoveSessionIfCurrent(const std::string &uuid, const MigrationSession *expected);
 
 private:
     SessionManager() = default;

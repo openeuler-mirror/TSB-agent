@@ -9,6 +9,11 @@
 namespace virtrust {
 
 constexpr std::string_view VIRTRUST_DEFAULT_URI = "qemu:///session";
+// 迁移独占资格只保护当前节点，源连接不能指向其他节点或依赖隐式默认连接。
+constexpr bool IsLocalMigrationSourceUri(std::string_view uri) noexcept
+{
+    return uri == "qemu:///system" || uri == "qemu:///session";
+}
 // 本地客户端与守护进程使用同一固定端点；父目录由守护进程按 root 专用策略管理。
 constexpr std::string_view UDS_PATH = "/run/virtrust/rpc.sock";
 

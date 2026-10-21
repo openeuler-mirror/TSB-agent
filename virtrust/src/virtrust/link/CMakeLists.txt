@@ -30,6 +30,43 @@ if(BUILD_TEST)
 endif()
 add_virtrust_test_if(grpc_server_test)
 add_virtrust_test_if(grpc_server_fault_test)
+if(BUILD_TEST AND ENABLE_MOCK_4_FUZZ)
+  # 服务入口单独编译，使链接包装仅影响定向测试，不改变生产共享库。
+  add_library(source-migration-admission-test-obj OBJECT migration_service_impl.cpp)
+  target_include_directories(source-migration-admission-test-obj PRIVATE
+    ${PROJECT_SOURCE_DIR}/src ${CMAKE_DEPS_INCLUDEDIR} ${CMAKE_BINARY_DIR}/src
+    ${CMAKE_BINARY_DIR}/src/virtrust)
+  target_link_libraries(source-migration-admission-test-obj PRIVATE virtrust-shared Deps::gtest Deps::secure_c)
+  add_virtrust_test_if(source_migration_admission_test)
+  target_link_libraries(source_migration_admission_test PRIVATE
+    source-migration-admission-test-obj grpc++ grpc gpr protobuf)
+  target_link_options(source_migration_admission_test PRIVATE
+    "LINKER:--wrap=_ZN8virtrust13NodeAdmission10TryAcquireENS_13AdmissionKindERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEEj"
+    "LINKER:--wrap=_ZN8virtrust16MigrationSession5StartEv"
+    "LINKER:--wrap=_ZN8virtrust16MigrationSession7CleanupEv")
+  set_tests_properties(source_migration_admission_test PROPERTIES TIMEOUT 30)
+
+  # 准入使用真实文件锁；通过包装入口注入准备、RPC、可信资源错误及确定性报告数据。
+  # 会话对象单独编译，并捕获定时器回调，以验证源端 Prepare 决策和迟到回调的清理边界。
+  add_library(destination-migration-session-test-obj OBJECT migration_session.cpp)
+  target_include_directories(destination-migration-session-test-obj PRIVATE
+    ${PROJECT_SOURCE_DIR}/src ${CMAKE_DEPS_INCLUDEDIR} ${CMAKE_BINARY_DIR}/src
+    ${CMAKE_BINARY_DIR}/src/virtrust)
+  target_link_libraries(destination-migration-session-test-obj PRIVATE virtrust-shared Deps::gtest Deps::secure_c)
+  add_virtrust_test_if(destination_migration_admission_test)
+  target_link_libraries(destination_migration_admission_test PRIVATE
+    source-migration-admission-test-obj destination-migration-session-test-obj grpc++ grpc gpr protobuf)
+  add_dependencies(destination_migration_admission_test interfac)
+  target_link_options(destination_migration_admission_test PRIVATE
+    "LINKER:--wrap=_ZN8virtrust13NodeAdmission10TryAcquireENS_13AdmissionKindERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEEj"
+    "LINKER:--wrap=_ZN8virtrust16MigrationSession24OnMigrateRequestReceivedEv"
+    "LINKER:--wrap=_ZN8virtrust16MigrationSession31OnStartMigrationRequestReceivedEv"
+    "LINKER:--wrap=_ZN8virtrust13RpcClientMock16PrepareMigrationEjRKNS_6protos17PrepareMigRequestEPNS1_15PrepareMigReplyE"
+    "LINKER:--wrap=_ZN8virtrust13RpcClientMock21NotifyVRMigrateResultEjRKNS_6protos20MigrateResultRequestEPNS1_18MigrateResultReplyE"
+    "LINKER:--wrap=MigrationImportVrootCipher"
+    "LINKER:--wrap=GetReport")
+  set_tests_properties(destination_migration_admission_test PROPERTIES TIMEOUT 30)
+endif()
 if(BUILD_TEST)
   set_tests_properties(grpc_server_test grpc_server_fault_test PROPERTIES TIMEOUT 30)
   # 测试直接调用 gRPC 头文件接口，须显式链接其内联实现使用的底层库。

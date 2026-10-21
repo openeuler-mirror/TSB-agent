@@ -18,6 +18,11 @@ constexpr int OP_MIGRATE_EXTRA_CMD_NUM = 2;
 
 OpRc OpMigrate::Exec()
 {
+    // CLI 在打开 libvirt 连接之前拒绝远端源，避免无效请求也触达其他节点。
+    if (!IsLocalMigrationSourceUri(config_.uri)) {
+        VIRTRUST_LOG_ERROR("Unsupported migration source URI: {}", config_.uri);
+        return OpRc::ERROR;
+    }
     // make connection
     conn_.reset();
     conn_ = std::make_unique<ConnCtx>();

@@ -149,6 +149,84 @@ TEST_P(DomainAdmissionTest, MigrationRejectsBeforeLegacyLockAndBusiness)
     EXPECT_EQ(test::AdmissionState().businessCalls, 0);
 }
 
+TEST(DomainMigrationAdmissionTest, SendsValidMigrationWithoutOpeningLegacyLock)
+{
+    auto conn = std::make_unique<ConnCtx>();
+    ASSERT_TRUE(conn->Connect());
+    auto &state = test::AdmissionState();
+    state.legacyOpens = state.udsCalls = 0;
+    state.failLegacyOpen = true;
+    state.udsResultOverride = 0;
+    EXPECT_EQ(DomainMigrate(conn, "test-domain-2", "qemu+tls://192.168.1.100/system", MIGRATE_UNDEFINE_SOURCE),
+              VirtrustRc::OK);
+    EXPECT_EQ(state.legacyOpens, 0);
+    EXPECT_EQ(state.udsCalls, 1);
+    state.failLegacyOpen = false;
+    state.udsResultOverride = -999;
+}
+
+TEST(DomainMigrationAdmissionTest, RejectsRemoteSourceBeforeBusinessQueryOrUds)
+{
+    auto conn = std::make_unique<ConnCtx>();
+    ASSERT_TRUE(conn->SetUri("qemu+ssh://remote.example.com/system"));
+    ASSERT_TRUE(conn->Connect());
+    auto &state = test::AdmissionState();
+    state.businessCalls = state.legacyOpens = state.udsCalls = 0;
+    state.udsResultOverride = 0;
+    EXPECT_EQ(DomainMigrate(conn, "test-domain-2", "qemu+tls://192.168.1.100/system", MIGRATE_UNDEFINE_SOURCE),
+              VirtrustRc::ERROR);
+    EXPECT_EQ(state.businessCalls, 0);
+    EXPECT_EQ(state.legacyOpens, 0);
+    EXPECT_EQ(state.udsCalls, 0);
+    state.udsResultOverride = -999;
+}
+
+TEST(DomainMigrationAdmissionTest, OnlyExplicitLocalSourceUrisAreAllowed)
+{
+    EXPECT_TRUE(IsLocalMigrationSourceUri("qemu:///system"));
+    EXPECT_TRUE(IsLocalMigrationSourceUri("qemu:///session"));
+    for (const auto uri : {"", "qemu+ssh://remote.example.com/system", "qemu+tls://remote.example.com/system",
+                           "qemu:///system?socket=/tmp/libvirt.sock", "qemu:///system/"}) {
+        EXPECT_FALSE(IsLocalMigrationSourceUri(uri)) << uri;
+    }
+}
+
+TEST(DomainMigrationAdmissionTest, MapsDaemonBusyButOtherFailuresRemainErrors)
+{
+    auto conn = std::make_unique<ConnCtx>();
+    ASSERT_TRUE(conn->Connect());
+    auto &state = test::AdmissionState();
+    state.legacyOpens = state.udsCalls = 0;
+    for (const auto &[reply, expected] : {
+             std::pair<int, VirtrustRc>{4, VirtrustRc::BUSY},
+             {1, VirtrustRc::ERROR},
+             {-1, VirtrustRc::ERROR}}) {
+        state.udsResultOverride = reply;
+        EXPECT_EQ(DomainMigrate(conn, "test-domain-2", "qemu+tls://192.168.1.100/system", MIGRATE_UNDEFINE_SOURCE),
+                  expected);
+    }
+    EXPECT_EQ(state.legacyOpens, 0);
+    EXPECT_EQ(state.udsCalls, 3);
+    state.udsResultOverride = -999;
+}
+
+TEST(DomainMigrationAdmissionTest, BusySurvivesDiagnosticFailure)
+{
+    auto conn = std::make_unique<ConnCtx>();
+    ASSERT_TRUE(conn->Connect());
+    auto &state = test::AdmissionState();
+    state.udsResultOverride = static_cast<int>(VirtrustRc::BUSY);
+    Logger::Instance()->SetCustomLogFunction([](LogLevel level, std::string_view) {
+        if (level == LogLevel::ERROR) {
+            throw std::bad_alloc();
+        }
+    });
+    EXPECT_EQ(DomainMigrate(conn, "test-domain-2", "qemu+tls://192.168.1.100/system", MIGRATE_UNDEFINE_SOURCE),
+              VirtrustRc::BUSY);
+    Logger::Instance()->Reset();
+    state.udsResultOverride = -999;
+}
+
 TEST_P(DomainAdmissionTest, SharedAdmissionAllowsBusinessAndReleasesOnReturn)
 {
     NodeAdmission ordinary;

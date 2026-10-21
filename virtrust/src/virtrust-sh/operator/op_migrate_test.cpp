@@ -4,9 +4,80 @@
 
 #include "gtest/gtest.h"
 
+#include <stdexcept>
+#include <string_view>
+#include <utility>
+
 #include "virtrust-sh/operator/op_migrate.h"
+#include "virtrust/base/logger.h"
+#include "virtrust/dllib/libvirt.h"
 
 namespace virtrust {
+namespace {
+// 异常或断言提前结束时恢复全局 libvirt 入口，避免污染后续用例。
+class ScopedMigrationConnectFailure {
+public:
+    ScopedMigrationConnectFailure() : original_(Libvirt::GetInstance().virConnectOpen)
+    {
+        calls_ = 0;
+        Libvirt::GetInstance().virConnectOpen = DlFun<virConnectPtr, const char *>(
+            "virConnectOpen", +[](const char *) -> virConnectPtr {
+                ++calls_;
+                return nullptr;
+            });
+    }
+    ~ScopedMigrationConnectFailure() { Libvirt::GetInstance().virConnectOpen = std::move(original_); }
+    ScopedMigrationConnectFailure(const ScopedMigrationConnectFailure &) = delete;
+    ScopedMigrationConnectFailure &operator=(const ScopedMigrationConnectFailure &) = delete;
+    int Calls() const { return calls_; }
+
+private:
+    inline static int calls_ = 0;
+    DlFun<virConnectPtr, const char *> original_;
+};
+
+// 故障注入退出时恢复日志回调，不把异常测试的配置带入后续用例。
+class ScopedMigrationLoggerReset {
+public:
+    ~ScopedMigrationLoggerReset() { Logger::Instance()->Reset(); }
+};
+} // 匿名命名空间
+
+TEST(OpMigrateTest, RejectsRemoteSourceBeforeConnecting)
+{
+    ScopedMigrationConnectFailure connection;
+
+    OpMigrate opMigrate;
+    OpConfig config;
+    config.uri = "qemu+ssh://remote.example.com/system";
+    opMigrate.SetConfig(config);
+    const auto result = opMigrate.Exec();
+
+    EXPECT_EQ(result, OpRc::ERROR);
+    EXPECT_EQ(connection.Calls(), 0);
+}
+
+TEST(OpMigrateTest, RestoresConnectionHookAfterDiagnosticException)
+{
+    {
+        ScopedMigrationConnectFailure connection;
+        ScopedMigrationLoggerReset loggerReset;
+        Logger::Instance()->SetCustomLogFunction([](LogLevel level, std::string_view) {
+            if (level == LogLevel::ERROR) {
+                throw std::runtime_error("Injected log failure");
+            }
+        });
+        OpMigrate opMigrate;
+        OpConfig config;
+        config.uri = "qemu+ssh://remote.example.com/system";
+        opMigrate.SetConfig(config);
+        EXPECT_THROW(opMigrate.Exec(), std::runtime_error);
+        EXPECT_EQ(connection.Calls(), 0);
+    }
+
+    ConnCtx conn;
+    EXPECT_TRUE(conn.Connect());
+}
 
 TEST(OpMigrateTest, ParseArgvValidArgumentsTest)
 {

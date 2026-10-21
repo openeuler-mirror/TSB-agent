@@ -20,6 +20,8 @@ struct AdmissionTestState {
     int admissionCalls = 0;
     int legacyOpens = 0;
     int businessCalls = 0;
+    int udsCalls = 0;
+    int udsResultOverride = -999;
     bool failLegacyOpen = false;
     bool throwInBusiness = false;
     // 仅供 fork 专用测试在 execv 前核对继承的节点准入描述符。
