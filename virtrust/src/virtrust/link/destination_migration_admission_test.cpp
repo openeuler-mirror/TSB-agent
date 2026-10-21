@@ -60,8 +60,12 @@ protected:
         if (rootInfo.st_uid != 0) {
             GTEST_SKIP() << "Root directory owner is virtualized; trusted-path admission cannot be tested";
         }
-        // 使用构建目录作为可信父目录；某些系统的 /tmp 属主不是 root。
-        const auto pattern = (std::filesystem::current_path() / "virtrust-destination-admission-XXXXXX").string();
+        // CI 工作区可能允许组写入；仅当 /tmp 满足生产目录策略时才优先使用它。
+        struct stat tempInfo {};
+        const bool trustedTemp = lstat("/tmp", &tempInfo) == 0 && S_ISDIR(tempInfo.st_mode) &&
+                                 tempInfo.st_uid == 0 && (tempInfo.st_mode & S_ISVTX) != 0;
+        const auto parent = trustedTemp ? std::filesystem::path("/tmp") : std::filesystem::current_path();
+        const auto pattern = (parent / "virtrust-destination-admission-XXXXXX").string();
         std::vector<char> path(pattern.begin(), pattern.end());
         path.push_back('\0');
         const char *created = mkdtemp(path.data());

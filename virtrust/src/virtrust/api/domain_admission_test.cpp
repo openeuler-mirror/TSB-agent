@@ -197,7 +197,7 @@ TEST(DomainMigrationAdmissionTest, MapsDaemonBusyButOtherFailuresRemainErrors)
     ASSERT_TRUE(conn->Connect());
     auto &state = test::AdmissionState();
     state.legacyOpens = state.udsCalls = 0;
-    for (const auto [reply, expected] : {
+    for (const auto &[reply, expected] : {
              std::pair<int, VirtrustRc>{4, VirtrustRc::BUSY},
              {1, VirtrustRc::ERROR},
              {-1, VirtrustRc::ERROR}}) {

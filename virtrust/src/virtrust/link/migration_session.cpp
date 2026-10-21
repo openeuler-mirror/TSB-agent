@@ -118,8 +118,8 @@ MigrateSessionRc MigrationSession::SendMigrateRequest()
     bool ok = (rc == 0 && reply.result() == 0);
 
     if (!ok) {
-        VIRTRUST_LOG_ERROR("|SendMigrateRequest|END|returnF|domain name: {}|PrepareMigration failed: rpc={}, business={}",
-                           domainName_, rc, reply.result());
+        VIRTRUST_LOG_ERROR("|SendMigrateRequest|END|returnF|domain name: {}"
+                           "|PrepareMigration failed: rpc={}, business={}", domainName_, rc, reply.result());
         OnFail();
         return MigrateSessionRc::ERROR;
     }
