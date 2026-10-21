@@ -22,6 +22,7 @@ add_virtrust_test_if(virt_xml_parser_test)
 add_virtrust_test_if(foreign_mounter_test)
 #add_virtrust_test_if(migrate_helper_test ${BUILD_TEST})
 # add_virtrust_test_if(async_timer_test ${BUILD_TEST})
+add_virtrust_test_if(async_timer_lifecycle_test)
 
 set(VIRTRUST_SOURCE_FILES
     ${VIRTRUST_SOURCE_FILES}
