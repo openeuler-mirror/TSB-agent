@@ -7,6 +7,7 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <utility>
 
 #include "virtrust/api/define_private.h"
 #include "virtrust/base/logger.h"
@@ -32,7 +33,8 @@ std::shared_ptr<MigrationSession> SessionManager::CreateSession(MigrationSession
                                                                 const std::string &domainName,
                                                                 const std::string &destUri,
                                                                 const std::string &localUri,
-                                                                const unsigned int flags)
+                                                                const unsigned int flags,
+                                                                NodeAdmission admission)
 {
     std::lock_guard<std::mutex> lock(mtx_);
 
@@ -42,7 +44,9 @@ std::shared_ptr<MigrationSession> SessionManager::CreateSession(MigrationSession
         return nullptr;
     }
 
-    auto session = std::make_shared<MigrationSession>(role, uuid, domainName, destUri, localUri, flags);
+    // 先把令牌交给对象，再发布到 manager；其他 RPC 不会看到尚未持锁的响应方会话。
+    auto session = std::make_shared<MigrationSession>(role, uuid, domainName, destUri, localUri, flags,
+                                                      std::move(admission));
     sessions_[uuid] = session;
     return session;
 }
@@ -63,15 +67,26 @@ void SessionManager::RemoveSession(const std::string &uuid)
     sessions_.erase(uuid);
 }
 
+void SessionManager::RemoveSessionIfCurrent(const std::string &uuid, const MigrationSession *expected)
+{
+    std::lock_guard<std::mutex> lock(mtx_);
+    const auto it = sessions_.find(uuid);
+    if (it != sessions_.end() && it->second.get() == expected) {
+        sessions_.erase(it);
+    }
+}
+
 MigrationSession::MigrationSession(Role role, const std::string &uuid, const std::string &domainName,
-                                   const std::string &destUri, const std::string &localUri, const unsigned int flags)
+                                   const std::string &destUri, const std::string &localUri, const unsigned int flags,
+                                   NodeAdmission admission)
     : role_(role),
       state_(State::Init),
       uuid_(uuid),
       domainName_(domainName),
       destUri_(destUri),
       localUri_(localUri),
-      flags_(flags)
+      flags_(flags),
+      admission_(std::move(admission))
 {}
 
 MigrateSessionRc MigrationSession::Start()
@@ -103,9 +118,14 @@ MigrateSessionRc MigrationSession::SendMigrateRequest()
     bool ok = (rc == 0 && reply.result() == 0);
 
     if (!ok) {
-        VIRTRUST_LOG_ERROR("|SendMigrateRequest|END|returnF|domain name: {}|send migrate request failed.", domainName_);
+        VIRTRUST_LOG_ERROR("|SendMigrateRequest|END|returnF|domain name: {}|PrepareMigration failed: rpc={}, business={}",
+                           domainName_, rc, reply.result());
         OnFail();
         return MigrateSessionRc::ERROR;
+    }
+    {
+        std::lock_guard<std::recursive_mutex> guard(operationMutex_);
+        destinationAccepted_ = true;
     }
     return OnMigrateResponseReceived();
 }
@@ -646,6 +666,10 @@ MigrateSessionRc MigrationSession::ImportTcm2Key(std::string_view tcm2Key)
 
 void MigrationSession::EnterState(State s)
 {
+    std::lock_guard<std::recursive_mutex> guard(operationMutex_);
+    if (cleanedUp_) {
+        return;
+    }
     state_ = s;
     CancelTimer();
 
@@ -676,22 +700,31 @@ void MigrationSession::StartTimerFor(State s)
     timerActive_.store(true);
     auto dur = TimeoutForState(s);
     std::weak_ptr<MigrationSession> weakSelf = weak_from_this();
-    timer_.Start(dur, [weakSelf, s] {
+    const auto generation = timerGeneration_;
+    timer_.Start(dur, [weakSelf, s, generation] {
         if (auto self = weakSelf.lock()) {
-            self->OnTimeout(s);
+            self->OnTimeoutForGeneration(s, generation);
         }
     });
 }
 
 void MigrationSession::CancelTimer()
 {
-    timer_.Cancel();
+    ++timerGeneration_;
     timerActive_.store(false);
+    timer_.Cancel();
 }
 
 void MigrationSession::OnTimeout(State stateWhenSet)
 {
-    if (!timerActive_.load() || state_ != stateWhenSet) {
+    std::lock_guard<std::recursive_mutex> guard(operationMutex_);
+    OnTimeoutForGeneration(stateWhenSet, timerGeneration_);
+}
+
+void MigrationSession::OnTimeoutForGeneration(State stateWhenSet, uint64_t generation)
+{
+    std::lock_guard<std::recursive_mutex> guard(operationMutex_);
+    if (cleanedUp_ || !timerActive_.load() || state_ != stateWhenSet || timerGeneration_ != generation) {
         return;
     }
     EnterState(State::Failed);
@@ -700,16 +733,31 @@ void MigrationSession::OnTimeout(State stateWhenSet)
 
 void MigrationSession::Cleanup()
 {
+    std::lock_guard<std::recursive_mutex> guard(operationMutex_);
+    if (cleanedUp_) {
+        return;
+    }
+    cleanedUp_ = true;
     CancelTimer();
-    VIRTRUST_LOG_DEBUG("|Cleanup|START|uuid: {}", uuid_);
-    SessionManager::GetInstance().RemoveSession(uuid_);
+    SessionManager::GetInstance().RemoveSessionIfCurrent(uuid_, this);
+    admission_.Release();
+    // 诊断失败不得阻止资格释放，或使终态清理被再次执行。
+    try {
+        VIRTRUST_LOG_DEBUG("|Cleanup|END|uuid: {}", uuid_);
+    } catch (...) {
+    }
 }
 
 void MigrationSession::OnFail()
 {
+    std::lock_guard<std::recursive_mutex> guard(operationMutex_);
+    if (cleanedUp_) {
+        return;
+    }
     VIRTRUST_LOG_DEBUG("|OnFail|START|");
-    // 向服务端发送迁移失败通知
-    if (role_ == Role::Initiator) {
+    // 未确认 Prepare 已被接受时不发送失败通知，避免误清理同 UUID 的旧会话。
+    if (role_ == Role::Initiator && destinationAccepted_) {
+        destinationAccepted_ = false;
         MigrateSessionRc sendRet = SendFinishedNotify(false);
         if (sendRet != MigrateSessionRc::OK) {
             VIRTRUST_LOG_ERROR("|DomainMigrate|END|returnF| domain name: {}|SendFinishedNotify failed.", domainName_);
@@ -722,6 +770,10 @@ void MigrationSession::OnFail()
 
 MigrateSessionRc MigrationSession::OnMigrateRequestReceived()
 {
+    std::lock_guard<std::recursive_mutex> guard(operationMutex_);
+    if (cleanedUp_) {
+        return MigrateSessionRc::ERROR;
+    }
     VIRTRUST_LOG_DEBUG("|OnMigrateRequestReceived|START|");
     if (CheckMaxDomainCount() != VirtrustRc::OK) {
         EnterState(State::Failed);
@@ -734,6 +786,10 @@ MigrateSessionRc MigrationSession::OnMigrateRequestReceived()
 MigrateSessionRc MigrationSession::OnExchangeKeyRequestReceived(const protos::EXchangePkAndReportRequest *request,
                                                                 protos::EXchangePkAndReportReply *response)
 {
+    std::lock_guard<std::recursive_mutex> guard(operationMutex_);
+    if (cleanedUp_) {
+        return MigrateSessionRc::ERROR;
+    }
     VIRTRUST_LOG_DEBUG("|OnExchangeKeyRequestReceived|START|");
     if (state_ != State::WaitingKey) {
         VIRTRUST_LOG_ERROR(
@@ -783,6 +839,10 @@ MigrateSessionRc MigrationSession::OnExchangeKeyRequestReceived(const protos::EX
 
 MigrateSessionRc MigrationSession::OnStartMigrationRequestReceived()
 {
+    std::lock_guard<std::recursive_mutex> guard(operationMutex_);
+    if (cleanedUp_) {
+        return MigrateSessionRc::ERROR;
+    }
     VIRTRUST_LOG_DEBUG("|OnStartMigrationRequestReceived|START|");
     if (state_ != State::CertVerify) {
         VIRTRUST_LOG_ERROR("|OnStartMigrationRequestReceived|END|returnF|domain name: {}|Waiting for starting "
@@ -799,6 +859,10 @@ MigrateSessionRc MigrationSession::OnStartMigrationRequestReceived()
 MigrateSessionRc MigrationSession::OnTransferDataRequestReceived(const protos::VRsourceInfoRequest *request,
                                                                  int32_t &result)
 {
+    std::lock_guard<std::recursive_mutex> guard(operationMutex_);
+    if (cleanedUp_) {
+        return MigrateSessionRc::ERROR;
+    }
     VIRTRUST_LOG_DEBUG("|OnTransferDataRequestReceived|START|");
     if (state_ != State::Transferring) {
         VIRTRUST_LOG_ERROR(
@@ -851,12 +915,17 @@ MigrateSessionRc MigrationSession::OnTransferDataRequestReceived(const protos::V
 
 MigrateSessionRc MigrationSession::OnFinishedRequestReceived(bool finished)
 {
+    std::lock_guard<std::recursive_mutex> guard(operationMutex_);
+    if (cleanedUp_) {
+        return MigrateSessionRc::ERROR;
+    }
     VIRTRUST_LOG_DEBUG("|OnFinishedRequestReceived|START|");
     if (role_ != Role::Responder) {
         return MigrateSessionRc::ERROR;
     }
     if (!finished) {
         VIRTRUST_LOG_ERROR("|OnFinishedRequestReceived|END|returnF|domain name: {}|Migrate failed.", domainName_);
+        EnterState(State::Failed);
         Cleanup();
         return MigrateSessionRc::OK;
     }
@@ -868,7 +937,9 @@ MigrateSessionRc MigrationSession::OnFinishedRequestReceived(bool finished)
         VIRTRUST_LOG_WARN("|OnFinishedRequestReceived|END|returnF|domain name: {}|Migrate libvirt and tsb resource "
                           "success but MigrationNotify(success) failed, please resolve tsb status.",
                           domainName_);
-        return MigrateSessionRc::OK;
+        EnterState(State::Failed);
+        Cleanup();
+        return MigrateSessionRc::ERROR;
     }
 
     EnterState(State::Finished);

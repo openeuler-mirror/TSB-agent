@@ -9,6 +9,7 @@
 #include <regex>
 #include <thread>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "libvirtrustd/defines.h"
@@ -84,35 +85,96 @@ void CleanupSourceSessionNoThrow(const std::shared_ptr<MigrationSession> &sessio
         }
     }
 }
+
+// RPC 异常边界先撤销响应方会话，再返回协议错误；不能让异常带着节点资格逸出 gRPC。
+void CleanupResponderSessionNoThrow(const std::shared_ptr<MigrationSession> &session) noexcept
+{
+    if (session == nullptr) {
+        return;
+    }
+    try {
+        session->Cleanup();
+    } catch (...) {
+        try {
+            SessionManager::GetInstance().RemoveSessionIfCurrent(session->Id(), session.get());
+        } catch (...) {
+        }
+    }
+}
+
+template <typename Action>
+MigrateSessionRc RunResponderStep(const std::shared_ptr<MigrationSession> &session, const char *name, Action &&action)
+{
+    try {
+        const auto result = std::forward<Action>(action)();
+        if (result != MigrateSessionRc::OK) {
+            CleanupResponderSessionNoThrow(session);
+        }
+        return result;
+    } catch (const std::exception &error) {
+        CleanupResponderSessionNoThrow(session);
+        try {
+            VIRTRUST_LOG_ERROR("|{}|END|returnF|Exception: {}", name, error.what());
+        } catch (...) {
+        }
+    } catch (...) {
+        CleanupResponderSessionNoThrow(session);
+    }
+    return MigrateSessionRc::ERROR;
+}
 } // namespace
 
 grpc::Status MigrationServiceImpl::PrepareMigration(grpc::ServerContext *context,
                                                     const protos::PrepareMigRequest *request,
                                                     protos::PrepareMigReply *response)
 {
-    VIRTRUST_LOG_DEBUG("|PrepareMigration|START||start handle rpc request");
-    auto &uuid = request->uuid();
-    auto &domainName = request->domainname();
-    auto &mgr = SessionManager::GetInstance();
+    if (request == nullptr || response == nullptr) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "Migration preparation request or reply is null");
+    }
+    // 预设业务结果为 Error，避免后续异常被误报为成功
+    response->set_result(static_cast<uint32_t>(VirtrustRc::ERROR));
+    std::shared_ptr<MigrationSession> session;
+    try {
+        VIRTRUST_LOG_DEBUG("|PrepareMigration|START||start handle rpc request");
+        // 先取得目的节点资格；会话尚未发布时发生竞争，不会留下半初始化的会话。
+        NodeAdmission admission;
+        const auto outcome = admission.TryAcquire(AdmissionKind::Migration);
+        if (outcome != LockOutcome::Acquired) {
+            response->set_result(static_cast<uint32_t>(outcome == LockOutcome::Busy ? VirtrustRc::BUSY
+                                                                                    : VirtrustRc::ERROR));
+            try {
+                VIRTRUST_LOG_ERROR("|PrepareMigration|Admission|{}", admission.LastError());
+            } catch (...) {
+            }
+            return grpc::Status::OK;
+        }
 
-    // 否则创建session
-    auto session = mgr.CreateSession(MigrationSession::Role::Responder, uuid, request->domainname(),
-                                     request->desturi(), request->localuri(), request->flags());
-    if (session == nullptr) { // already exists or failed
-        VIRTRUST_LOG_ERROR(
-            "|PrepareMigration|END|returnF|domain name: {}|Session already exists, this VM is already migrating",
-            domainName);
-        response->set_result(1);
+        auto &mgr = SessionManager::GetInstance();
+        session = mgr.CreateSession(MigrationSession::Role::Responder, request->uuid(), request->domainname(),
+                                    request->desturi(), request->localuri(), request->flags(), std::move(admission));
+        if (session == nullptr) {
+            VIRTRUST_LOG_ERROR("|PrepareMigration|END|returnF|domain name: {}|Session already exists",
+                               request->domainname());
+            return grpc::Status::OK;
+        }
+        if (session->OnMigrateRequestReceived() != MigrateSessionRc::OK) {
+            // 预检查失败是终态；不能让无定时器的 Failed 会话永久持有节点资格。
+            session->Cleanup();
+            return grpc::Status::OK;
+        }
+        response->set_result(static_cast<uint32_t>(VirtrustRc::OK));
+        return grpc::Status::OK;
+    } catch (const std::exception &error) {
+        CleanupResponderSessionNoThrow(session);
+        try {
+            VIRTRUST_LOG_ERROR("|PrepareMigration|END|returnF|Exception: {}", error.what());
+        } catch (...) {
+        }
+        return grpc::Status::OK;
+    } catch (...) {
+        CleanupResponderSessionNoThrow(session);
         return grpc::Status::OK;
     }
-
-    MigrateSessionRc rc = session->OnMigrateRequestReceived();
-    if (rc != MigrateSessionRc::OK) {
-        response->set_result(1);
-        return grpc::Status::OK;
-    }
-    response->set_result(0);
-    return grpc::Status::OK;
 }
 
 // 2: 交换公钥和报告
@@ -120,7 +182,6 @@ grpc::Status MigrationServiceImpl::ExchangePkAndReport(grpc::ServerContext *cont
                                                        const protos::EXchangePkAndReportRequest *request,
                                                        protos::EXchangePkAndReportReply *response)
 {
-    VIRTRUST_LOG_DEBUG("|ExchangePkAndReport|START||start handle rpc request");
     auto &uuid = request->uuid();
     auto &domainName = request->domainname();
     auto session = SessionManager::GetInstance().GetSession(uuid);
@@ -130,7 +191,10 @@ grpc::Status MigrationServiceImpl::ExchangePkAndReport(grpc::ServerContext *cont
         return grpc::Status::OK;
     }
 
-    MigrateSessionRc rc = session->OnExchangeKeyRequestReceived(request, response);
+    MigrateSessionRc rc = RunResponderStep(session, "ExchangePkAndReport", [&] {
+        VIRTRUST_LOG_DEBUG("|ExchangePkAndReport|START||start handle rpc request");
+        return session->OnExchangeKeyRequestReceived(request, response);
+    });
     if (rc != MigrateSessionRc::OK) {
         response->set_result(1);
         return grpc::Status::OK;
@@ -144,7 +208,6 @@ grpc::Status MigrationServiceImpl::ExchangePkAndReport(grpc::ServerContext *cont
 grpc::Status MigrationServiceImpl::StartMigration(grpc::ServerContext *context, const protos::StartMigRequest *request,
                                                   protos::StartMigReply *response)
 {
-    VIRTRUST_LOG_DEBUG("|StartMigration|START||start handle rpc request");
     auto &uuid = request->uuid();
     auto &domainName = request->domainname();
     auto session = SessionManager::GetInstance().GetSession(uuid);
@@ -154,7 +217,10 @@ grpc::Status MigrationServiceImpl::StartMigration(grpc::ServerContext *context, 
         return grpc::Status::OK;
     }
 
-    MigrateSessionRc rc = session->OnStartMigrationRequestReceived();
+    MigrateSessionRc rc = RunResponderStep(session, "StartMigration", [&] {
+        VIRTRUST_LOG_DEBUG("|StartMigration|START||start handle rpc request");
+        return session->OnStartMigrationRequestReceived();
+    });
     if (rc != MigrateSessionRc::OK) {
         response->set_result(1);
         return grpc::Status::OK;
@@ -169,7 +235,6 @@ grpc::Status MigrationServiceImpl::SendVRsourceData(grpc::ServerContext *context
                                                     const protos::VRsourceInfoRequest *request,
                                                     protos::VRsourceInfoReply *response)
 {
-    VIRTRUST_LOG_DEBUG("|SendVRsourceData|START||start handle rpc request");
     if (request == nullptr) {
         VIRTRUST_LOG_ERROR("|SendVRsourceData|END|returnF||request is nullptr.");
         response->set_result(1);
@@ -184,7 +249,10 @@ grpc::Status MigrationServiceImpl::SendVRsourceData(grpc::ServerContext *context
     }
     // 服务端
     int32_t result = 0;
-    MigrateSessionRc rc = session->OnTransferDataRequestReceived(request, result);
+    MigrateSessionRc rc = RunResponderStep(session, "SendVRsourceData", [&] {
+        VIRTRUST_LOG_DEBUG("|SendVRsourceData|START||start handle rpc request");
+        return session->OnTransferDataRequestReceived(request, result);
+    });
     if (rc != MigrateSessionRc::OK) {
         response->set_result(1);
         if (result != 0) {
@@ -202,7 +270,6 @@ grpc::Status MigrationServiceImpl::NotifyVRMigrateResult(grpc::ServerContext *co
                                                          const protos::MigrateResultRequest *request,
                                                          protos::MigrateResultReply *response)
 {
-    VIRTRUST_LOG_DEBUG("|NotifyVRMigrateResult|START||start handle rpc request");
     if (request == nullptr) {
         VIRTRUST_LOG_ERROR("|DomainMigrate|END|returnF|NotifyVRMigrateResult request is nullptr.");
         response->set_result(1);
@@ -215,7 +282,10 @@ grpc::Status MigrationServiceImpl::NotifyVRMigrateResult(grpc::ServerContext *co
         response->set_result(1);
         return grpc::Status::OK;
     }
-    MigrateSessionRc rc = session->OnFinishedRequestReceived(request->result() == 0);
+    MigrateSessionRc rc = RunResponderStep(session, "NotifyVRMigrateResult", [&] {
+        VIRTRUST_LOG_DEBUG("|NotifyVRMigrateResult|START||start handle rpc request");
+        return session->OnFinishedRequestReceived(request->result() == 0);
+    });
     if (rc != MigrateSessionRc::OK) {
         response->set_result(1);
         return grpc::Status::OK;
@@ -269,6 +339,7 @@ grpc::Status MigrationServiceImpl::DomainMigrate(grpc::ServerContext *context,
         LinkConfig config = ConfigMgr::Instance().GetLinkConfig();
         config.ip = destIp;
         auto &mgr = SessionManager::GetInstance();
+        // 源端整个迁移过程始终由外层请求持锁admission；session 无须再获取同一节点的锁
         session = mgr.CreateSession(MigrationSession::Role::Initiator, request->uuid(), request->domainname(),
                                     request->desturi(), request->localuri(), request->flags());
         if (!session) {
