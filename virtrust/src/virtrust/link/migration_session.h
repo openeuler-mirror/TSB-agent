@@ -32,7 +32,7 @@ public:
         Responder  // 服务端状态
     };
 
-    enum class State { Init, WaitingKey, CertVerify, Transferring, Finished, Failed };
+    enum class State { Init, WaitingKey, CertVerify, Transferring, AwaitingFinish, Finished, Failed };
 
     MigrationSession(Role role, const std::string &uuid, const std::string &domainName,
                      const std::string &destUri = "", const std::string &localUri = "", const unsigned int flags = 0,
@@ -74,6 +74,40 @@ public:
     MigrateSessionRc OnFinishedRequestReceived(bool finished);
 
 private:
+    // 响应方业务失败与资格清理必须在同一会话锁范围内完成，避免等待中的 RPC 插入。
+    template <typename Action>
+    MigrateSessionRc RunResponderStep(Action &&action)
+    {
+        std::lock_guard<std::recursive_mutex> guard(operationMutex_);
+        if (role_ != Role::Responder || cleanedUp_) {
+            return MigrateSessionRc::ERROR;
+        }
+        if (state_ == State::Failed || state_ == State::Finished) {
+            Cleanup();
+            return MigrateSessionRc::ERROR;
+        }
+        try {
+            const auto result = action();
+            if (result != MigrateSessionRc::OK) {
+                EnterState(State::Failed);
+                Cleanup();
+            }
+            return result;
+        } catch (...) {
+            EnterState(State::Failed);
+            Cleanup();
+            throw;
+        }
+    }
+
+    // 具体阶段动作由公开入口在统一锁与终态边界内调用。
+    MigrateSessionRc PrepareResponder();
+    MigrateSessionRc ExchangeResponderKey(const protos::EXchangePkAndReportRequest *request,
+                                          protos::EXchangePkAndReportReply *response);
+    MigrateSessionRc BeginResponderTransfer();
+    MigrateSessionRc ImportResponderData(const protos::VRsourceInfoRequest *request, int32_t &result);
+    MigrateSessionRc FinishResponder(bool finished);
+
     // 这几个是收到对端应答时要调用的
     MigrateSessionRc OnMigrateResponseReceived();
 

@@ -61,9 +61,11 @@ if(BUILD_TEST AND ENABLE_MOCK_4_FUZZ)
     "LINKER:--wrap=_ZN8virtrust13NodeAdmission10TryAcquireENS_13AdmissionKindERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEEj"
     "LINKER:--wrap=_ZN8virtrust16MigrationSession24OnMigrateRequestReceivedEv"
     "LINKER:--wrap=_ZN8virtrust16MigrationSession31OnStartMigrationRequestReceivedEv"
+    "LINKER:--wrap=_ZN8virtrust16MigrationSession7CleanupEv"
     "LINKER:--wrap=_ZN8virtrust13RpcClientMock16PrepareMigrationEjRKNS_6protos17PrepareMigRequestEPNS1_15PrepareMigReplyE"
     "LINKER:--wrap=_ZN8virtrust13RpcClientMock21NotifyVRMigrateResultEjRKNS_6protos20MigrateResultRequestEPNS1_18MigrateResultReplyE"
     "LINKER:--wrap=MigrationImportVrootCipher"
+    "LINKER:--wrap=MigrationNotify"
     "LINKER:--wrap=GetReport")
   set_tests_properties(destination_migration_admission_test PROPERTIES TIMEOUT 30)
 endif()
