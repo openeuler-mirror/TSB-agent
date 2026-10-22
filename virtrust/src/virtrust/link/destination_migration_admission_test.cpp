@@ -14,11 +14,13 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 #include "virtrust/api/defines.h"
 #include "virtrust/base/logger.h"
 #include "virtrust/base/node_admission.h"
+#include "virtrust/dllib/libvirt.h"
 #include "virtrust/link/migration_service_impl.h"
 #include "virtrust/link/migration_session.h"
 
@@ -35,9 +37,19 @@ struct DestinationTestState {
     bool useRealClientPrepare = false;
     // 在源端同步 Prepare 调用尚未返回时，确定性触发会话阶段超时。
     bool expireSourceDuringPrepare = false;
+    bool acceptPrepareAfterSourceTimeout = false;
+    bool rejectSourceFinish = false;
+    bool failSourceSuccessNotify = false;
+    bool sourceTimeoutObservedInLibvirt = false;
     bool captureTimers = false;
     bool failCipherImport = false;
+    bool acceptSuccessNotification = false;
+    bool probeAtCleanup = false;
+    bool cleanupProbeRan = false;
     int cipherImportCalls = 0;
+    int getReportCalls = 0;
+    int successNotificationCalls = 0;
+    MigrateSessionRc cleanupProbeResult = MigrateSessionRc::OK;
     int clientPrepareCalls = 0;
     int clientNotifyCalls = 0;
     uint32_t clientPrepareResult = 0;
@@ -48,6 +60,19 @@ DestinationTestState &State()
 {
     static DestinationTestState state;
     return state;
+}
+
+virDomainPtr ExpireSourceInsideLibvirt(virDomainPtr, virConnectPtr, virTypedParameterPtr,
+                                       unsigned int, unsigned int)
+{
+    auto source = SessionManager::GetInstance().GetSession("12345678-1234-1234-1234-123456789002");
+    EXPECT_NE(source, nullptr);
+    if (source) {
+        source->OnTimeout(MigrationSession::State::Transferring);
+        State().sourceTimeoutObservedInLibvirt =
+            SessionManager::GetInstance().GetSession(source->Id()) == source;
+    }
+    return reinterpret_cast<virDomainPtr>(0x98765432);
 }
 
 class DestinationMigrationAdmissionTest : public ::testing::Test {
@@ -107,7 +132,7 @@ protected:
         return reply.result();
     }
 
-    bool AdvanceToTransferring(const std::string &uuid)
+    bool AdvanceToCertVerify(const std::string &uuid)
     {
         State().useRealPrepare = true;
         if (Prepare(uuid) != 0) {
@@ -120,6 +145,14 @@ protected:
         if (!service_.ExchangePkAndReport(nullptr, &exchange, &exchanged).ok() || exchanged.result() != 0) {
             return false;
         }
+        return true;
+    }
+
+    bool AdvanceToTransferring(const std::string &uuid)
+    {
+        if (!AdvanceToCertVerify(uuid)) {
+            return false;
+        }
         protos::StartMigRequest start;
         start.set_uuid(uuid);
         start.set_domainname("test-domain");
@@ -127,11 +160,42 @@ protected:
         return service_.StartMigration(nullptr, &start, &started).ok() && started.result() == 0;
     }
 
+    bool AdvanceToAwaitingFinish(const std::string &uuid)
+    {
+        if (!AdvanceToTransferring(uuid)) {
+            return false;
+        }
+        protos::VRsourceInfoRequest request;
+        request.set_uuid(uuid);
+        request.set_cipherdata("cipher");
+        request.mutable_vtpcminfo()->set_name("test-domain");
+        request.mutable_vtpcminfo()->set_uuid(uuid);
+        protos::VRsourceInfoReply reply;
+        return service_.SendVRsourceData(nullptr, &request, &reply).ok() && reply.result() == 0;
+    }
+
     LockOutcome OrdinaryProbe()
     {
         NodeAdmission ordinary;
         const auto result = ordinary.TryAcquire(AdmissionKind::OrdinaryMutation, State().directory, geteuid());
         EXPECT_NE(result, LockOutcome::Error) << ordinary.LastError();
+        return result;
+    }
+
+    MigrateSessionRc RunMockSource()
+    {
+        State().captureTimers = true;
+        constexpr const char *uuid = "12345678-1234-1234-1234-123456789002";
+        auto session = SessionManager::GetInstance().CreateSession(
+            MigrationSession::Role::Initiator, uuid, "test-domain-2", "qemu+tls://192.168.1.100/system",
+            "qemu:///system", 0);
+        EXPECT_NE(session, nullptr);
+        if (!session) {
+            return MigrateSessionRc::ERROR;
+        }
+        session->SetRpcClient(std::make_unique<RpcClient>(LinkConfig{}));
+        const auto result = session->Start();
+        session->Cleanup();
         return result;
     }
 
@@ -201,6 +265,116 @@ TEST_F(DestinationMigrationAdmissionTest, OutOfOrderRpcAbortsSessionAndReleasesA
     EXPECT_EQ(reply.result(), static_cast<uint32_t>(VirtrustRc::ERROR));
     EXPECT_EQ(SessionManager::GetInstance().GetSession("destination-test-1"), nullptr);
     EXPECT_EQ(OrdinaryProbe(), LockOutcome::Acquired);
+}
+
+TEST_F(DestinationMigrationAdmissionTest, DirectResponderStepFailureIsTerminalBeforeReturn)
+{
+    State().useRealPrepare = true;
+    ASSERT_EQ(Prepare("destination-test-1"), 0U);
+    auto session = SessionManager::GetInstance().GetSession("destination-test-1");
+    ASSERT_NE(session, nullptr);
+
+    // 直接调用响应方入口，不能依赖外层 RPC 包装延后清理。
+    EXPECT_EQ(session->OnStartMigrationRequestReceived(), MigrateSessionRc::ERROR);
+    EXPECT_EQ(SessionManager::GetInstance().GetSession("destination-test-1"), nullptr);
+    EXPECT_EQ(session->OnMigrateRequestReceived(), MigrateSessionRc::ERROR);
+    EXPECT_EQ(OrdinaryProbe(), LockOutcome::Acquired);
+}
+
+TEST_F(DestinationMigrationAdmissionTest, DuplicatePrepareTerminatesSession)
+{
+    State().useRealPrepare = true;
+    ASSERT_EQ(Prepare("destination-test-1"), 0U);
+    auto session = SessionManager::GetInstance().GetSession("destination-test-1");
+    ASSERT_NE(session, nullptr);
+    // 已进入 WaitingKey 时重复预检查不是重试成功，不能刷新阶段计时器。
+    EXPECT_EQ(session->OnMigrateRequestReceived(), MigrateSessionRc::ERROR);
+    EXPECT_EQ(SessionManager::GetInstance().GetSession("destination-test-1"), nullptr);
+    EXPECT_EQ(OrdinaryProbe(), LockOutcome::Acquired);
+}
+
+TEST_F(DestinationMigrationAdmissionTest, FailureMarksTerminalBeforeCleanupBoundary)
+{
+    State().useRealPrepare = true;
+    ASSERT_EQ(Prepare("destination-test-1"), 0U);
+    State().probeAtCleanup = true;
+    protos::StartMigRequest request;
+    request.set_uuid("destination-test-1");
+    protos::StartMigReply reply;
+    ASSERT_TRUE(service_.StartMigration(nullptr, &request, &reply).ok());
+    EXPECT_EQ(reply.result(), static_cast<uint32_t>(VirtrustRc::ERROR));
+    ASSERT_TRUE(State().cleanupProbeRan);
+    // 清理入口同步模拟另一个 RPC 已持有旧 shared_ptr；失败终态必须先于该入口可见。
+    EXPECT_EQ(State().cleanupProbeResult, MigrateSessionRc::ERROR);
+    EXPECT_EQ(State().getReportCalls, 0);
+    EXPECT_EQ(SessionManager::GetInstance().GetSession("destination-test-1"), nullptr);
+    EXPECT_EQ(OrdinaryProbe(), LockOutcome::Acquired);
+}
+
+TEST_F(DestinationMigrationAdmissionTest, DirectResponderExceptionCleansBeforeRethrow)
+{
+    State().useRealPrepare = true;
+    ASSERT_EQ(Prepare("destination-test-1"), 0U);
+    auto session = SessionManager::GetInstance().GetSession("destination-test-1");
+    ASSERT_NE(session, nullptr);
+    Logger::Instance()->SetCustomLogFunction([](LogLevel level, std::string_view) {
+        if (level == LogLevel::DEBUG) {
+            throw std::bad_alloc();
+        }
+    });
+    EXPECT_THROW((void)session->OnStartMigrationRequestReceived(), std::bad_alloc);
+    Logger::Instance()->Reset();
+    EXPECT_EQ(SessionManager::GetInstance().GetSession("destination-test-1"), nullptr);
+    EXPECT_EQ(OrdinaryProbe(), LockOutcome::Acquired);
+}
+
+TEST_F(DestinationMigrationAdmissionTest, NonStandardResponderExceptionCleansBeforeRethrow)
+{
+    State().useRealPrepare = true;
+    ASSERT_EQ(Prepare("destination-test-1"), 0U);
+    auto session = SessionManager::GetInstance().GetSession("destination-test-1");
+    ASSERT_NE(session, nullptr);
+    Logger::Instance()->SetCustomLogFunction([](LogLevel level, std::string_view) {
+        if (level == LogLevel::DEBUG) {
+            throw 7;
+        }
+    });
+    EXPECT_THROW((void)session->OnStartMigrationRequestReceived(), int);
+    Logger::Instance()->Reset();
+    EXPECT_EQ(SessionManager::GetInstance().GetSession("destination-test-1"), nullptr);
+    EXPECT_EQ(OrdinaryProbe(), LockOutcome::Acquired);
+}
+
+TEST_F(DestinationMigrationAdmissionTest, ResponderEntryDoesNotTerminateInitiatorSession)
+{
+    auto &manager = SessionManager::GetInstance();
+    auto session = manager.CreateSession(MigrationSession::Role::Initiator, "source-test", "test-domain", "", "", 0);
+    ASSERT_NE(session, nullptr);
+    EXPECT_EQ(session->OnFinishedRequestReceived(false), MigrateSessionRc::ERROR);
+    EXPECT_EQ(manager.GetSession("source-test"), session);
+    session->Cleanup();
+}
+
+TEST_F(DestinationMigrationAdmissionTest, StaleResponderEntryCannotAffectReplacementSession)
+{
+    State().useRealPrepare = true;
+    ASSERT_EQ(Prepare("destination-test-1"), 0U);
+    auto stale = SessionManager::GetInstance().GetSession("destination-test-1");
+    ASSERT_NE(stale, nullptr);
+    stale->Cleanup();
+    ASSERT_EQ(Prepare("destination-test-1"), 0U);
+    auto replacement = SessionManager::GetInstance().GetSession("destination-test-1");
+    ASSERT_NE(replacement, nullptr);
+    ASSERT_NE(replacement, stale);
+
+    protos::EXchangePkAndReportRequest request;
+    request.set_uuid("destination-test-1");
+    protos::EXchangePkAndReportReply reply;
+    EXPECT_EQ(stale->OnExchangeKeyRequestReceived(&request, &reply), MigrateSessionRc::ERROR);
+    EXPECT_EQ(State().getReportCalls, 0);
+    EXPECT_EQ(SessionManager::GetInstance().GetSession("destination-test-1"), replacement);
+    EXPECT_EQ(OrdinaryProbe(), LockOutcome::Busy);
+    replacement->Cleanup();
 }
 
 TEST_F(DestinationMigrationAdmissionTest, TransferHandlerFailureReleasesAdmission)
@@ -281,28 +455,141 @@ TEST_F(DestinationMigrationAdmissionTest, CreateVrootFailureReleasesAdmission)
 
 TEST_F(DestinationMigrationAdmissionTest, SuccessNotificationFailureStillReleasesAdmission)
 {
-    ASSERT_EQ(Prepare("destination-test-1"), 0U);
-    protos::MigrateResultRequest request;
-    request.set_uuid("destination-test-1");
-    request.set_result(0);
-    protos::MigrateResultReply reply;
-    EXPECT_TRUE(service_.NotifyVRMigrateResult(nullptr, &request, &reply).ok());
-    EXPECT_EQ(reply.result(), static_cast<uint32_t>(VirtrustRc::ERROR));
-    EXPECT_EQ(SessionManager::GetInstance().GetSession("destination-test-1"), nullptr);
-    EXPECT_EQ(OrdinaryProbe(), LockOutcome::Acquired);
-}
-
-TEST_F(DestinationMigrationAdmissionTest, SeededMockVrootNotificationSuccessReleasesAdmission)
-{
-    constexpr const char *uuid = "12345678-1234-1234-1234-123456789001";
-    ASSERT_EQ(Prepare(uuid), 0U);
-    // mock 仅以预置 UUID 判定通知成功；此用例验证成功分支收尾，不代表全链路迁移成功。
+    constexpr const char *uuid = "12345678-1234-1234-1234-123456789010";
+    ASSERT_TRUE(AdvanceToAwaitingFinish(uuid));
     protos::MigrateResultRequest request;
     request.set_uuid(uuid);
     request.set_result(0);
     protos::MigrateResultReply reply;
     EXPECT_TRUE(service_.NotifyVRMigrateResult(nullptr, &request, &reply).ok());
+    EXPECT_EQ(reply.result(), static_cast<uint32_t>(VirtrustRc::ERROR));
+    EXPECT_EQ(State().successNotificationCalls, 1);
+    EXPECT_EQ(SessionManager::GetInstance().GetSession(uuid), nullptr);
+    EXPECT_EQ(OrdinaryProbe(), LockOutcome::Acquired);
+}
+
+TEST_F(DestinationMigrationAdmissionTest, ImportCompletionAllowsSuccessNotification)
+{
+    constexpr const char *uuid = "12345678-1234-1234-1234-123456789010";
+    State().acceptSuccessNotification = true;
+    ASSERT_TRUE(AdvanceToAwaitingFinish(uuid));
+    EXPECT_EQ(State().cipherImportCalls, 1);
+    EXPECT_EQ(OrdinaryProbe(), LockOutcome::Busy);
+    protos::MigrateResultRequest request;
+    request.set_uuid(uuid);
+    request.set_result(0);
+    protos::MigrateResultReply reply;
+    ASSERT_TRUE(service_.NotifyVRMigrateResult(nullptr, &request, &reply).ok());
     EXPECT_EQ(reply.result(), static_cast<uint32_t>(VirtrustRc::OK));
+    EXPECT_EQ(State().successNotificationCalls, 1);
+    EXPECT_EQ(SessionManager::GetInstance().GetSession(uuid), nullptr);
+    EXPECT_EQ(OrdinaryProbe(), LockOutcome::Acquired);
+}
+
+TEST_F(DestinationMigrationAdmissionTest, FailureNotificationAfterImportReleasesAdmission)
+{
+    constexpr const char *uuid = "12345678-1234-1234-1234-123456789010";
+    ASSERT_TRUE(AdvanceToAwaitingFinish(uuid));
+    protos::MigrateResultRequest request;
+    request.set_uuid(uuid);
+    request.set_result(1);
+    protos::MigrateResultReply reply;
+    ASSERT_TRUE(service_.NotifyVRMigrateResult(nullptr, &request, &reply).ok());
+    EXPECT_EQ(reply.result(), static_cast<uint32_t>(VirtrustRc::OK));
+    EXPECT_EQ(State().successNotificationCalls, 0);
+    EXPECT_EQ(SessionManager::GetInstance().GetSession(uuid), nullptr);
+    EXPECT_EQ(OrdinaryProbe(), LockOutcome::Acquired);
+}
+
+TEST_F(DestinationMigrationAdmissionTest, AwaitingFinishTimeoutReleasesAdmission)
+{
+    constexpr const char *uuid = "12345678-1234-1234-1234-123456789010";
+    State().captureTimers = true;
+    ASSERT_TRUE(AdvanceToAwaitingFinish(uuid));
+    ASSERT_GE(State().timerCallbacks.size(), 4U);
+    EXPECT_EQ(OrdinaryProbe(), LockOutcome::Busy);
+    State().timerCallbacks.back()();
+    EXPECT_EQ(SessionManager::GetInstance().GetSession(uuid), nullptr);
+    EXPECT_EQ(OrdinaryProbe(), LockOutcome::Acquired);
+}
+
+TEST_F(DestinationMigrationAdmissionTest, SuccessNotificationBeforeImportIsRejected)
+{
+    constexpr const char *uuid = "12345678-1234-1234-1234-123456789001";
+    State().useRealPrepare = true;
+    ASSERT_EQ(Prepare(uuid), 0U);
+    // 预置 UUID 使底层 mock 通知可成功；业务必须先拒绝尚未导入资源的成功通知。
+    protos::MigrateResultRequest request;
+    request.set_uuid(uuid);
+    request.set_result(0);
+    protos::MigrateResultReply reply;
+    EXPECT_TRUE(service_.NotifyVRMigrateResult(nullptr, &request, &reply).ok());
+    EXPECT_EQ(reply.result(), static_cast<uint32_t>(VirtrustRc::ERROR));
+    EXPECT_EQ(State().successNotificationCalls, 0);
+    EXPECT_EQ(SessionManager::GetInstance().GetSession(uuid), nullptr);
+    EXPECT_EQ(OrdinaryProbe(), LockOutcome::Acquired);
+}
+
+TEST_F(DestinationMigrationAdmissionTest, SuccessNotificationInInitialStateIsRejected)
+{
+    constexpr const char *uuid = "12345678-1234-1234-1234-123456789001";
+    // 此夹具的 Prepare 包装仅发布会话，保留 Init，以覆盖最早的非法通知。
+    ASSERT_EQ(Prepare(uuid), 0U);
+    protos::MigrateResultRequest request;
+    request.set_uuid(uuid);
+    request.set_result(0);
+    protos::MigrateResultReply reply;
+    ASSERT_TRUE(service_.NotifyVRMigrateResult(nullptr, &request, &reply).ok());
+    EXPECT_EQ(reply.result(), static_cast<uint32_t>(VirtrustRc::ERROR));
+    EXPECT_EQ(State().successNotificationCalls, 0);
+    EXPECT_EQ(SessionManager::GetInstance().GetSession(uuid), nullptr);
+    EXPECT_EQ(OrdinaryProbe(), LockOutcome::Acquired);
+}
+
+TEST_F(DestinationMigrationAdmissionTest, SuccessNotificationBeforeStartIsRejected)
+{
+    constexpr const char *uuid = "12345678-1234-1234-1234-123456789001";
+    ASSERT_TRUE(AdvanceToCertVerify(uuid));
+    protos::MigrateResultRequest request;
+    request.set_uuid(uuid);
+    request.set_result(0);
+    protos::MigrateResultReply reply;
+    ASSERT_TRUE(service_.NotifyVRMigrateResult(nullptr, &request, &reply).ok());
+    EXPECT_EQ(reply.result(), static_cast<uint32_t>(VirtrustRc::ERROR));
+    EXPECT_EQ(State().successNotificationCalls, 0);
+    EXPECT_EQ(SessionManager::GetInstance().GetSession(uuid), nullptr);
+    EXPECT_EQ(OrdinaryProbe(), LockOutcome::Acquired);
+}
+
+TEST_F(DestinationMigrationAdmissionTest, SuccessNotificationDuringTransferIsRejected)
+{
+    constexpr const char *uuid = "12345678-1234-1234-1234-123456789001";
+    ASSERT_TRUE(AdvanceToTransferring(uuid));
+    protos::MigrateResultRequest request;
+    request.set_uuid(uuid);
+    request.set_result(0);
+    protos::MigrateResultReply reply;
+    ASSERT_TRUE(service_.NotifyVRMigrateResult(nullptr, &request, &reply).ok());
+    EXPECT_EQ(reply.result(), static_cast<uint32_t>(VirtrustRc::ERROR));
+    EXPECT_EQ(State().successNotificationCalls, 0);
+    EXPECT_EQ(SessionManager::GetInstance().GetSession(uuid), nullptr);
+    EXPECT_EQ(OrdinaryProbe(), LockOutcome::Acquired);
+}
+
+TEST_F(DestinationMigrationAdmissionTest, DuplicateTransferAfterImportDoesNotRepeatCipherImport)
+{
+    constexpr const char *uuid = "12345678-1234-1234-1234-123456789010";
+    ASSERT_TRUE(AdvanceToAwaitingFinish(uuid));
+    ASSERT_EQ(State().cipherImportCalls, 1);
+    protos::VRsourceInfoRequest request;
+    request.set_uuid(uuid);
+    request.set_cipherdata("cipher");
+    request.mutable_vtpcminfo()->set_name("test-domain");
+    request.mutable_vtpcminfo()->set_uuid(uuid);
+    protos::VRsourceInfoReply reply;
+    ASSERT_TRUE(service_.SendVRsourceData(nullptr, &request, &reply).ok());
+    EXPECT_EQ(reply.result(), static_cast<uint32_t>(VirtrustRc::ERROR));
+    EXPECT_EQ(State().cipherImportCalls, 1);
     EXPECT_EQ(SessionManager::GetInstance().GetSession(uuid), nullptr);
     EXPECT_EQ(OrdinaryProbe(), LockOutcome::Acquired);
 }
@@ -395,19 +682,16 @@ TEST_F(DestinationMigrationAdmissionTest, TimerCallbackAndFailureNotificationCon
     }
 }
 
-TEST_F(DestinationMigrationAdmissionTest, EarlierTimerGenerationCannotCleanRestartedState)
+TEST_F(DestinationMigrationAdmissionTest, EarlierTimerGenerationCannotCleanAdvancedState)
 {
-    State().useRealPrepare = true;
     State().captureTimers = true;
-    ASSERT_EQ(Prepare("destination-test-1"), 0U);
+    ASSERT_TRUE(AdvanceToTransferring("destination-test-1"));
     auto session = SessionManager::GetInstance().GetSession("destination-test-1");
     ASSERT_NE(session, nullptr);
-    ASSERT_EQ(State().timerCallbacks.size(), 1U);
-    auto staleCallback = State().timerCallbacks.front();
+    ASSERT_GE(State().timerCallbacks.size(), 3U);
+    auto staleCallback = State().timerCallbacks[State().timerCallbacks.size() - 2];
 
-    // 同一状态重新计时后，旧回调携带的代数不得终结当前会话。
-    ASSERT_EQ(session->OnMigrateRequestReceived(), MigrateSessionRc::OK);
-    ASSERT_EQ(State().timerCallbacks.size(), 2U);
+    // 阶段推进后，前一阶段的定时器回调不得终结当前会话。
     staleCallback();
     EXPECT_EQ(SessionManager::GetInstance().GetSession("destination-test-1"), session);
     EXPECT_EQ(OrdinaryProbe(), LockOutcome::Busy);
@@ -485,24 +769,82 @@ TEST_F(DestinationMigrationAdmissionTest, SourceFailureBeforeAcceptedPrepareDoes
     destination->Cleanup();
 }
 
-// 源端资格由 DomainMigrate 的栈对象持有；会话超时不能让仍在执行的请求失去互斥保护。
-TEST_F(DestinationMigrationAdmissionTest, SourceTimeoutDuringPrepareKeepsAdmissionUntilRequestReturns)
+// 手动持有真实准入锁来模拟外层请求；本用例验证会话未被超时回调提前移除，不覆盖 DomainMigrate 入口。
+TEST_F(DestinationMigrationAdmissionTest, SourceTimeoutDuringPrepareKeepsSessionWhileExternalAdmissionHeld)
 {
     constexpr const char *uuid = "12345678-1234-1234-1234-123456789002";
     State().captureTimers = true;
     State().expireSourceDuringPrepare = true;
-    protos::DomainMigraterRequest request;
-    request.set_uuid(uuid);
-    request.set_domainname("test-domain-2");
-    request.set_localuri("qemu:///system");
-    request.set_desturi("qemu+tls://192.168.1.100/system");
-    protos::DomainMigraterReply reply;
-
-    EXPECT_TRUE(service_.DomainMigrate(nullptr, &request, &reply).ok());
+    NodeAdmission admission;
+    ASSERT_EQ(admission.TryAcquire(AdmissionKind::Migration, State().directory, geteuid()), LockOutcome::Acquired);
+    auto session = SessionManager::GetInstance().CreateSession(MigrationSession::Role::Initiator, uuid,
+                                                               "test-domain-2", "", "", 0);
+    ASSERT_NE(session, nullptr);
+    session->SetRpcClient(std::make_unique<RpcClient>(LinkConfig{}));
+    EXPECT_EQ(session->Start(), MigrateSessionRc::ERROR);
     EXPECT_EQ(State().clientPrepareCalls, 1);
-    EXPECT_EQ(reply.result(), static_cast<uint32_t>(VirtrustRc::ERROR));
+    session->Cleanup();
+    session.reset();
     EXPECT_EQ(SessionManager::GetInstance().GetSession(uuid), nullptr);
+    admission.Release();
     EXPECT_EQ(OrdinaryProbe(), LockOutcome::Acquired);
+}
+
+// Prepare 超时后若模拟返回成功，验证源端会继续执行；后续 RPC 仍由 mock 提供结果。
+TEST_F(DestinationMigrationAdmissionTest, SourceTimeoutAfterAcceptedPrepareCanStillSucceed)
+{
+    constexpr const char *uuid = "12345678-1234-1234-1234-123456789002";
+    State().captureTimers = true;
+    State().expireSourceDuringPrepare = true;
+    State().acceptPrepareAfterSourceTimeout = true;
+    NodeAdmission admission;
+    ASSERT_EQ(admission.TryAcquire(AdmissionKind::Migration, State().directory, geteuid()), LockOutcome::Acquired);
+    auto session = SessionManager::GetInstance().CreateSession(MigrationSession::Role::Initiator, uuid,
+                                                               "test-domain-2", "qemu+tls://192.168.1.100/system",
+                                                               "qemu:///system", 0);
+    ASSERT_NE(session, nullptr);
+    session->SetRpcClient(std::make_unique<RpcClient>(LinkConfig{}));
+    EXPECT_EQ(session->Start(), MigrateSessionRc::OK);
+    EXPECT_EQ(State().clientPrepareCalls, 1);
+    EXPECT_GT(State().getReportCalls, 0);
+    EXPECT_EQ(State().clientNotifyCalls, 1);
+    session->Cleanup();
+    session.reset();
+    EXPECT_EQ(SessionManager::GetInstance().GetSession(uuid), nullptr);
+    admission.Release();
+    EXPECT_EQ(OrdinaryProbe(), LockOutcome::Acquired);
+}
+
+TEST_F(DestinationMigrationAdmissionTest, SourceSuccessRequiresDestinationFinalAcknowledgment)
+{
+    State().rejectSourceFinish = true;
+    EXPECT_EQ(RunMockSource(), MigrateSessionRc::ERROR);
+    EXPECT_EQ(State().successNotificationCalls, 1);
+    EXPECT_EQ(State().clientNotifyCalls, 1);
+}
+
+TEST_F(DestinationMigrationAdmissionTest, SourceTsbSuccessFailureCannotBeReportedAsSuccess)
+{
+    State().failSourceSuccessNotify = true;
+    EXPECT_EQ(RunMockSource(), MigrateSessionRc::ERROR);
+    EXPECT_EQ(State().successNotificationCalls, 1);
+    EXPECT_EQ(State().clientNotifyCalls, 0);
+}
+
+// 在 libvirt mock 内手动触发阶段超时，验证源端未提前清理，并在调用返回后发出最终通知。
+TEST_F(DestinationMigrationAdmissionTest, SourceTimeoutInsideLibvirtWaitsForFinalization)
+{
+    auto &migration = Libvirt::GetInstance().virDomainMigrate3;
+    struct RestoreMigration {
+        decltype(migration) target;
+        std::remove_reference_t<decltype(migration)> original;
+        ~RestoreMigration() { target = original; }
+    } restore{migration, migration};
+    migration = decltype(restore.original)("virDomainMigrate3", ExpireSourceInsideLibvirt);
+
+    EXPECT_EQ(RunMockSource(), MigrateSessionRc::OK);
+    EXPECT_TRUE(State().sourceTimeoutObservedInLibvirt);
+    EXPECT_EQ(State().clientNotifyCalls, 1);
 }
 
 // 已取消的源端回调既不能清理尚待外层收尾的会话，也不能在对象销毁后误删同 UUID 新会话。
@@ -582,6 +924,23 @@ extern "C" virtrust::MigrateSessionRc WrappedDestinationStart(virtrust::Migratio
     return RealDestinationStart(session);
 }
 
+extern "C" void RealDestinationCleanup(virtrust::MigrationSession *)
+    asm("__real__ZN8virtrust16MigrationSession7CleanupEv");
+extern "C" void WrappedDestinationCleanup(virtrust::MigrationSession *)
+    asm("__wrap__ZN8virtrust16MigrationSession7CleanupEv");
+extern "C" void WrappedDestinationCleanup(virtrust::MigrationSession *session)
+{
+    if (virtrust::State().probeAtCleanup) {
+        virtrust::State().probeAtCleanup = false;
+        virtrust::State().cleanupProbeRan = true;
+        virtrust::protos::EXchangePkAndReportRequest request;
+        request.set_uuid(session->Id());
+        virtrust::protos::EXchangePkAndReportReply reply;
+        virtrust::State().cleanupProbeResult = session->OnExchangeKeyRequestReceived(&request, &reply);
+    }
+    RealDestinationCleanup(session);
+}
+
 extern "C" int32_t RealDestinationClientPrepare(virtrust::RpcClientMock *, uint32_t,
     const virtrust::protos::PrepareMigRequest &, virtrust::protos::PrepareMigReply *)
     asm("__real__ZN8virtrust13RpcClientMock16PrepareMigrationEjRKNS_6protos17PrepareMigRequestEPNS1_15PrepareMigReplyE");
@@ -598,12 +957,13 @@ extern "C" int32_t WrappedDestinationClientPrepare(virtrust::RpcClientMock *self
         if (!virtrust::State().timerCallbacks.empty()) {
             virtrust::State().timerCallbacks.front()();
         }
-        EXPECT_EQ(virtrust::SessionManager::GetInstance().GetSession(request.uuid()), nullptr);
+        EXPECT_NE(virtrust::SessionManager::GetInstance().GetSession(request.uuid()), nullptr);
         virtrust::NodeAdmission ordinary;
         EXPECT_EQ(ordinary.TryAcquire(virtrust::AdmissionKind::OrdinaryMutation, virtrust::State().directory,
                                       geteuid()), virtrust::LockOutcome::Busy);
-        // 注入 Prepare 失败，让真实 Start/DomainMigrate 收尾；不模拟完整迁移或声称超时可取消 RPC。
-        response->set_result(static_cast<uint32_t>(virtrust::VirtrustRc::ERROR));
+        // 模拟调用返回后的两种结果；超时不能抢占 RPC，也不能提前放开资格。
+        response->set_result(virtrust::State().acceptPrepareAfterSourceTimeout ? 0
+                            : static_cast<uint32_t>(virtrust::VirtrustRc::ERROR));
         return 0;
     }
     if (!virtrust::State().useRealClientPrepare) {
@@ -628,10 +988,22 @@ extern "C" int32_t WrappedDestinationClientNotify(virtrust::RpcClientMock *, uin
 extern "C" int32_t WrappedDestinationClientNotify(virtrust::RpcClientMock *self, uint32_t timeout,
     const virtrust::protos::MigrateResultRequest &request, virtrust::protos::MigrateResultReply *response)
 {
+    // 无论走哪条注入分支，都统计最终通知调用，避免未调用断言被默认 mock 路径掩盖。
+    ++virtrust::State().clientNotifyCalls;
+    if (virtrust::State().rejectSourceFinish) {
+        EXPECT_EQ(request.result(), 0U);
+        response->set_result(1);
+        // 生产客户端会把目的端业务结果作为方法返回值交给源端。
+        return response->result();
+    }
+    if (virtrust::State().acceptPrepareAfterSourceTimeout) {
+        EXPECT_EQ(request.result(), 0U);
+        response->set_result(0);
+        return 0;
+    }
     if (!virtrust::State().useRealClientPrepare) {
         return RealDestinationClientNotify(self, timeout, request, response);
     }
-    ++virtrust::State().clientNotifyCalls;
     virtrust::MigrationServiceImpl service;
     return service.NotifyVRMigrateResult(nullptr, &request, response).ok() ? 0 : -1;
 }
@@ -661,6 +1033,22 @@ extern "C" int WrappedDestinationCipherImport(char *physicalUuid, char *virtualU
     return RealDestinationCipherImport(physicalUuid, virtualUuid, cipher, length);
 }
 
+extern "C" int RealDestinationMigrationNotify(char *, int) asm("__real_MigrationNotify");
+extern "C" int WrappedDestinationMigrationNotify(char *, int) asm("__wrap_MigrationNotify");
+extern "C" int WrappedDestinationMigrationNotify(char *uuid, int status)
+{
+    if (status == 0) {
+        ++virtrust::State().successNotificationCalls;
+        if (virtrust::State().failSourceSuccessNotify) {
+            return -1;
+        }
+        if (virtrust::State().acceptSuccessNotification) {
+            return 0;
+        }
+    }
+    return RealDestinationMigrationNotify(uuid, status);
+}
+
 extern "C" int RealDestinationGetReport(char *, char *, trust_report_new *, trust_report_new *)
     asm("__real_GetReport");
 extern "C" int WrappedDestinationGetReport(char *, char *, trust_report_new *, trust_report_new *)
@@ -668,6 +1056,7 @@ extern "C" int WrappedDestinationGetReport(char *, char *, trust_report_new *, t
 extern "C" int WrappedDestinationGetReport(char *physicalUuid, char *virtualUuid,
     trust_report_new *hostReport, trust_report_new *vmReport)
 {
+    ++virtrust::State().getReportCalls;
     const int result = RealDestinationGetReport(physicalUuid, virtualUuid, hostReport, vmReport);
     if (result == 0 && hostReport != nullptr && vmReport != nullptr) {
         // 现有 mock 的 GetReport 返回成功但不写输出；测试在序列化前补齐确定性数据。
