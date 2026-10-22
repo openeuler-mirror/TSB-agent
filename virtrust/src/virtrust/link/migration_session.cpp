@@ -310,10 +310,11 @@ MigrateSessionRc MigrationSession::OnTransferResponseReceived(bool transferRet)
     // 通知TSB迁移成功，如果调用失败，TSB虚机状态会保持 VM_MIGRATION
     auto rc = NotifyVRMigration(true);
     if (rc != MigrateSessionRc::OK) {
-        VIRTRUST_LOG_WARN("|OnTransferResponseReceived|END|returnF|domain name: {}|Migrate libvirt and tsb resource "
-                          "success but MigrationNotify(success) failed, please resolve tsb status.",
-                          domainName_);
-        return MigrateSessionRc::OK;
+        VIRTRUST_LOG_ERROR("|OnTransferResponseReceived|END|returnF|domain name: {}|Libvirt transfer succeeded but "
+                           "MigrationNotify(success) failed; inspect TSB state manually.", domainName_);
+        // 底层可能已产生不可逆副作用，不能在此发送失败通知或自动回滚。
+        EnterState(State::Failed);
+        return MigrateSessionRc::ERROR;
     }
 
     // 所有动作执行完后，判断是否删除本地虚机
@@ -328,8 +329,13 @@ MigrateSessionRc MigrationSession::OnTransferResponseReceived(bool transferRet)
         }
     }
 
-    // 向对端发送最终通知，忽略通知结果
-    (void)SendFinishedNotify(true);
+    // 已完成可信资源提交后，最终确认失败只能报告不确定结果，不能倒退为失败补偿。
+    if (SendFinishedNotify(true) != MigrateSessionRc::OK) {
+        VIRTRUST_LOG_ERROR("|OnTransferResponseReceived|END|returnF|domain name: {}|Final destination "
+                           "acknowledgment failed; inspect destination state manually.", domainName_);
+        EnterState(State::Failed);
+        return MigrateSessionRc::ERROR;
+    }
     EnterState(State::Finished);
     return MigrateSessionRc::OK;
 }
@@ -352,6 +358,11 @@ MigrateSessionRc MigrationSession::SendFinishedNotify(bool success)
 MigrateSessionRc MigrationSession::OnFinishedResponseReceived(bool finished)
 {
     VIRTRUST_LOG_DEBUG("|OnFinishedResponseReceived|START|");
+    if (!finished) {
+        VIRTRUST_LOG_ERROR("|OnFinishedResponseReceived|END|returnF|domain name: {}|Destination rejected final "
+                           "migration notification.", domainName_);
+        return MigrateSessionRc::ERROR;
+    }
     return MigrateSessionRc::OK;
 }
 
@@ -726,6 +737,18 @@ void MigrationSession::OnTimeoutForGeneration(State stateWhenSet, uint64_t gener
 {
     std::lock_guard<std::recursive_mutex> guard(operationMutex_);
     if (cleanedUp_ || !timerActive_.load() || state_ != stateWhenSet || timerGeneration_ != generation) {
+        return;
+    }
+    if (role_ == Role::Initiator) {
+        // 源端超时仅记录诊断，实际业务结果由同步执行线程决定。
+        CancelTimer();
+        try {
+            VIRTRUST_LOG_WARN("|SourceMigration|Timeout|uuid: {}, domain name: {}, stage: {}|Stage deadline "
+                              "expired; migration continues until its actual result is known.",
+                              uuid_, domainName_, static_cast<int>(stateWhenSet));
+        } catch (...) {
+            // 定时器线程不得因诊断异常而终止进程。
+        }
         return;
     }
     EnterState(State::Failed);

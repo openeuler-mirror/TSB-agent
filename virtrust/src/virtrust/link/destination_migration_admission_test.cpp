@@ -14,11 +14,13 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 #include "virtrust/api/defines.h"
 #include "virtrust/base/logger.h"
 #include "virtrust/base/node_admission.h"
+#include "virtrust/dllib/libvirt.h"
 #include "virtrust/link/migration_service_impl.h"
 #include "virtrust/link/migration_session.h"
 
@@ -35,6 +37,10 @@ struct DestinationTestState {
     bool useRealClientPrepare = false;
     // 在源端同步 Prepare 调用尚未返回时，确定性触发会话阶段超时。
     bool expireSourceDuringPrepare = false;
+    bool acceptPrepareAfterSourceTimeout = false;
+    bool rejectSourceFinish = false;
+    bool failSourceSuccessNotify = false;
+    bool sourceTimeoutObservedInLibvirt = false;
     bool captureTimers = false;
     bool failCipherImport = false;
     bool acceptSuccessNotification = false;
@@ -54,6 +60,19 @@ DestinationTestState &State()
 {
     static DestinationTestState state;
     return state;
+}
+
+virDomainPtr ExpireSourceInsideLibvirt(virDomainPtr, virConnectPtr, virTypedParameterPtr,
+                                       unsigned int, unsigned int)
+{
+    auto source = SessionManager::GetInstance().GetSession("12345678-1234-1234-1234-123456789002");
+    EXPECT_NE(source, nullptr);
+    if (source) {
+        source->OnTimeout(MigrationSession::State::Transferring);
+        State().sourceTimeoutObservedInLibvirt =
+            SessionManager::GetInstance().GetSession(source->Id()) == source;
+    }
+    return reinterpret_cast<virDomainPtr>(0x98765432);
 }
 
 class DestinationMigrationAdmissionTest : public ::testing::Test {
@@ -160,6 +179,23 @@ protected:
         NodeAdmission ordinary;
         const auto result = ordinary.TryAcquire(AdmissionKind::OrdinaryMutation, State().directory, geteuid());
         EXPECT_NE(result, LockOutcome::Error) << ordinary.LastError();
+        return result;
+    }
+
+    MigrateSessionRc RunMockSource()
+    {
+        State().captureTimers = true;
+        constexpr const char *uuid = "12345678-1234-1234-1234-123456789002";
+        auto session = SessionManager::GetInstance().CreateSession(
+            MigrationSession::Role::Initiator, uuid, "test-domain-2", "qemu+tls://192.168.1.100/system",
+            "qemu:///system", 0);
+        EXPECT_NE(session, nullptr);
+        if (!session) {
+            return MigrateSessionRc::ERROR;
+        }
+        session->SetRpcClient(std::make_unique<RpcClient>(LinkConfig{}));
+        const auto result = session->Start();
+        session->Cleanup();
         return result;
     }
 
@@ -733,24 +769,82 @@ TEST_F(DestinationMigrationAdmissionTest, SourceFailureBeforeAcceptedPrepareDoes
     destination->Cleanup();
 }
 
-// 源端资格由 DomainMigrate 的栈对象持有；会话超时不能让仍在执行的请求失去互斥保护。
-TEST_F(DestinationMigrationAdmissionTest, SourceTimeoutDuringPrepareKeepsAdmissionUntilRequestReturns)
+// 手动持有真实准入锁来模拟外层请求；本用例验证会话未被超时回调提前移除，不覆盖 DomainMigrate 入口。
+TEST_F(DestinationMigrationAdmissionTest, SourceTimeoutDuringPrepareKeepsSessionWhileExternalAdmissionHeld)
 {
     constexpr const char *uuid = "12345678-1234-1234-1234-123456789002";
     State().captureTimers = true;
     State().expireSourceDuringPrepare = true;
-    protos::DomainMigraterRequest request;
-    request.set_uuid(uuid);
-    request.set_domainname("test-domain-2");
-    request.set_localuri("qemu:///system");
-    request.set_desturi("qemu+tls://192.168.1.100/system");
-    protos::DomainMigraterReply reply;
-
-    EXPECT_TRUE(service_.DomainMigrate(nullptr, &request, &reply).ok());
+    NodeAdmission admission;
+    ASSERT_EQ(admission.TryAcquire(AdmissionKind::Migration, State().directory, geteuid()), LockOutcome::Acquired);
+    auto session = SessionManager::GetInstance().CreateSession(MigrationSession::Role::Initiator, uuid,
+                                                               "test-domain-2", "", "", 0);
+    ASSERT_NE(session, nullptr);
+    session->SetRpcClient(std::make_unique<RpcClient>(LinkConfig{}));
+    EXPECT_EQ(session->Start(), MigrateSessionRc::ERROR);
     EXPECT_EQ(State().clientPrepareCalls, 1);
-    EXPECT_EQ(reply.result(), static_cast<uint32_t>(VirtrustRc::ERROR));
+    session->Cleanup();
+    session.reset();
     EXPECT_EQ(SessionManager::GetInstance().GetSession(uuid), nullptr);
+    admission.Release();
     EXPECT_EQ(OrdinaryProbe(), LockOutcome::Acquired);
+}
+
+// Prepare 超时后若模拟返回成功，验证源端会继续执行；后续 RPC 仍由 mock 提供结果。
+TEST_F(DestinationMigrationAdmissionTest, SourceTimeoutAfterAcceptedPrepareCanStillSucceed)
+{
+    constexpr const char *uuid = "12345678-1234-1234-1234-123456789002";
+    State().captureTimers = true;
+    State().expireSourceDuringPrepare = true;
+    State().acceptPrepareAfterSourceTimeout = true;
+    NodeAdmission admission;
+    ASSERT_EQ(admission.TryAcquire(AdmissionKind::Migration, State().directory, geteuid()), LockOutcome::Acquired);
+    auto session = SessionManager::GetInstance().CreateSession(MigrationSession::Role::Initiator, uuid,
+                                                               "test-domain-2", "qemu+tls://192.168.1.100/system",
+                                                               "qemu:///system", 0);
+    ASSERT_NE(session, nullptr);
+    session->SetRpcClient(std::make_unique<RpcClient>(LinkConfig{}));
+    EXPECT_EQ(session->Start(), MigrateSessionRc::OK);
+    EXPECT_EQ(State().clientPrepareCalls, 1);
+    EXPECT_GT(State().getReportCalls, 0);
+    EXPECT_EQ(State().clientNotifyCalls, 1);
+    session->Cleanup();
+    session.reset();
+    EXPECT_EQ(SessionManager::GetInstance().GetSession(uuid), nullptr);
+    admission.Release();
+    EXPECT_EQ(OrdinaryProbe(), LockOutcome::Acquired);
+}
+
+TEST_F(DestinationMigrationAdmissionTest, SourceSuccessRequiresDestinationFinalAcknowledgment)
+{
+    State().rejectSourceFinish = true;
+    EXPECT_EQ(RunMockSource(), MigrateSessionRc::ERROR);
+    EXPECT_EQ(State().successNotificationCalls, 1);
+    EXPECT_EQ(State().clientNotifyCalls, 1);
+}
+
+TEST_F(DestinationMigrationAdmissionTest, SourceTsbSuccessFailureCannotBeReportedAsSuccess)
+{
+    State().failSourceSuccessNotify = true;
+    EXPECT_EQ(RunMockSource(), MigrateSessionRc::ERROR);
+    EXPECT_EQ(State().successNotificationCalls, 1);
+    EXPECT_EQ(State().clientNotifyCalls, 0);
+}
+
+// 在 libvirt mock 内手动触发阶段超时，验证源端未提前清理，并在调用返回后发出最终通知。
+TEST_F(DestinationMigrationAdmissionTest, SourceTimeoutInsideLibvirtWaitsForFinalization)
+{
+    auto &migration = Libvirt::GetInstance().virDomainMigrate3;
+    struct RestoreMigration {
+        decltype(migration) target;
+        std::remove_reference_t<decltype(migration)> original;
+        ~RestoreMigration() { target = original; }
+    } restore{migration, migration};
+    migration = decltype(restore.original)("virDomainMigrate3", ExpireSourceInsideLibvirt);
+
+    EXPECT_EQ(RunMockSource(), MigrateSessionRc::OK);
+    EXPECT_TRUE(State().sourceTimeoutObservedInLibvirt);
+    EXPECT_EQ(State().clientNotifyCalls, 1);
 }
 
 // 已取消的源端回调既不能清理尚待外层收尾的会话，也不能在对象销毁后误删同 UUID 新会话。
@@ -863,12 +957,13 @@ extern "C" int32_t WrappedDestinationClientPrepare(virtrust::RpcClientMock *self
         if (!virtrust::State().timerCallbacks.empty()) {
             virtrust::State().timerCallbacks.front()();
         }
-        EXPECT_EQ(virtrust::SessionManager::GetInstance().GetSession(request.uuid()), nullptr);
+        EXPECT_NE(virtrust::SessionManager::GetInstance().GetSession(request.uuid()), nullptr);
         virtrust::NodeAdmission ordinary;
         EXPECT_EQ(ordinary.TryAcquire(virtrust::AdmissionKind::OrdinaryMutation, virtrust::State().directory,
                                       geteuid()), virtrust::LockOutcome::Busy);
-        // 注入 Prepare 失败，让真实 Start/DomainMigrate 收尾；不模拟完整迁移或声称超时可取消 RPC。
-        response->set_result(static_cast<uint32_t>(virtrust::VirtrustRc::ERROR));
+        // 模拟调用返回后的两种结果；超时不能抢占 RPC，也不能提前放开资格。
+        response->set_result(virtrust::State().acceptPrepareAfterSourceTimeout ? 0
+                            : static_cast<uint32_t>(virtrust::VirtrustRc::ERROR));
         return 0;
     }
     if (!virtrust::State().useRealClientPrepare) {
@@ -893,10 +988,22 @@ extern "C" int32_t WrappedDestinationClientNotify(virtrust::RpcClientMock *, uin
 extern "C" int32_t WrappedDestinationClientNotify(virtrust::RpcClientMock *self, uint32_t timeout,
     const virtrust::protos::MigrateResultRequest &request, virtrust::protos::MigrateResultReply *response)
 {
+    // 无论走哪条注入分支，都统计最终通知调用，避免未调用断言被默认 mock 路径掩盖。
+    ++virtrust::State().clientNotifyCalls;
+    if (virtrust::State().rejectSourceFinish) {
+        EXPECT_EQ(request.result(), 0U);
+        response->set_result(1);
+        // 生产客户端会把目的端业务结果作为方法返回值交给源端。
+        return response->result();
+    }
+    if (virtrust::State().acceptPrepareAfterSourceTimeout) {
+        EXPECT_EQ(request.result(), 0U);
+        response->set_result(0);
+        return 0;
+    }
     if (!virtrust::State().useRealClientPrepare) {
         return RealDestinationClientNotify(self, timeout, request, response);
     }
-    ++virtrust::State().clientNotifyCalls;
     virtrust::MigrationServiceImpl service;
     return service.NotifyVRMigrateResult(nullptr, &request, response).ok() ? 0 : -1;
 }
@@ -932,6 +1039,9 @@ extern "C" int WrappedDestinationMigrationNotify(char *uuid, int status)
 {
     if (status == 0) {
         ++virtrust::State().successNotificationCalls;
+        if (virtrust::State().failSourceSuccessNotify) {
+            return -1;
+        }
         if (virtrust::State().acceptSuccessNotification) {
             return 0;
         }
