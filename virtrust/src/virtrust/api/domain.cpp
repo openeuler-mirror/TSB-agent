@@ -506,13 +506,28 @@ void FreeDescription(Description **description)
     }
 }
 
-VirtrustRc SafeGetVRoots(int *tsbVmNum, Description **vtpcmInfos)
+VirtrustRc SafeGetVRoots(int *tsbVmNum, Description **vtpcmInfos, MigrationError *failure = nullptr)
 {
     int ret = GetVRoots(tsbVmNum, vtpcmInfos);
-    if (ret != 0 || *tsbVmNum < 0) {
+    if (ret != 0) {
+        if (failure != nullptr) {
+            *failure = {MigrationStage::None, MigrationSide::Unknown, MigrationOperation::GetDescription,
+                        MigrationErrorOrigin::Tsb, true, ret};
+        }
+        return VirtrustRc::ERROR;
+    }
+    if (*tsbVmNum < 0) {
+        if (failure != nullptr) {
+            *failure = {MigrationStage::None, MigrationSide::Unknown, MigrationOperation::GetDescription,
+                        MigrationErrorOrigin::Internal, false, 0};
+        }
         return VirtrustRc::ERROR;
     }
     if (*tsbVmNum != 0 && *vtpcmInfos == nullptr) {
+        if (failure != nullptr) {
+            *failure = {MigrationStage::None, MigrationSide::Unknown, MigrationOperation::GetDescription,
+                        MigrationErrorOrigin::Internal, false, 0};
+        }
         return VirtrustRc::ERROR;
     }
     return VirtrustRc::OK;
@@ -699,16 +714,23 @@ VirtrustRc CheckCreateArgs(const std::vector<std::string> &args)
 
 } // namespace
 
-VirtrustRc CheckMaxDomainCount()
+VirtrustRc CheckMaxDomainCount(MigrationError *failure)
 {
+    if (failure != nullptr) {
+        *failure = {};
+    }
     int tsbVmNum = 0;
     Description *tsbVmInfo = nullptr;
-    auto rc = SafeGetVRoots(&tsbVmNum, &tsbVmInfo);
+    auto rc = SafeGetVRoots(&tsbVmNum, &tsbVmInfo, failure);
     if (rc != VirtrustRc::OK) {
         VIRTRUST_LOG_ERROR("|CheckMaxDomainCount|END|returnF||Failed to get tsb domains");
         return VirtrustRc::ERROR;
     }
     if (static_cast<uint32_t>(tsbVmNum) >= MAX_DOMAIN_COUNT) {
+        if (failure != nullptr) {
+            *failure = {MigrationStage::None, MigrationSide::Unknown, MigrationOperation::Validate,
+                        MigrationErrorOrigin::Validation, false, 0};
+        }
         FreeDescription(&tsbVmInfo);
         VIRTRUST_LOG_ERROR("|CheckMaxDomainCount|END|returnF||support max domain count is: {}", MAX_DOMAIN_COUNT);
         return VirtrustRc::ERROR;
@@ -903,24 +925,36 @@ VirtrustRc DomainDestroy(const std::unique_ptr<ConnCtx> &conn, const std::string
 }
 
 VirtrustRc DomainList(const std::unique_ptr<ConnCtx> &conn, unsigned int flags,
-                      std::unordered_map<std::string, DomainInfo> &domainInfos, bool printErrToCli)
+                      std::unordered_map<std::string, DomainInfo> &domainInfos, bool printErrToCli,
+                      MigrationError *failure)
 {
     VIRTRUST_LOG_DEBUG("|DomainList||START||start list");
+    if (failure != nullptr) {
+        *failure = {};
+    }
     if (conn == nullptr) {
         VIRTRUST_LOG_ERROR("|DomainList|END|returnF|| ConnCtx is nullptr.");
+        if (failure != nullptr) {
+            *failure = {MigrationStage::None, MigrationSide::Unknown, MigrationOperation::Validate,
+                        MigrationErrorOrigin::Validation, false, 0};
+        }
         return VirtrustRc::ERROR;
     }
     // 使用按位与操作来检查value是否包含无效的标志
     if (flags == 0 || (flags & LIST_DOMAINS_MASK) != flags) {
         VIRTRUST_LOG_ERROR("|DomainList|END|returnF||invalid flags, support value "
                            "see DomainListFlags.");
+        if (failure != nullptr) {
+            *failure = {MigrationStage::None, MigrationSide::Unknown, MigrationOperation::Validate,
+                        MigrationErrorOrigin::Validation, false, 0};
+        }
         return VirtrustRc::ERROR;
     }
     domainInfos.clear();
 
     int tsbVmNum = 0;
     Description *tsbVmInfo = nullptr;
-    auto ret = SafeGetVRoots(&tsbVmNum, &tsbVmInfo);
+    auto ret = SafeGetVRoots(&tsbVmNum, &tsbVmInfo, failure);
     if (ret != VirtrustRc::OK) {
         VIRTRUST_LOG_ERROR("|DomainList|END|returnF||failed to get tsb domains");
         return VirtrustRc::ERROR;
@@ -929,6 +963,11 @@ VirtrustRc DomainList(const std::unique_ptr<ConnCtx> &conn, unsigned int flags,
     virDomainPtr *virtVmInfo = nullptr;
     int virtVmNum = Libvirt::GetInstance().virConnectListAllDomains(conn->Get(), &virtVmInfo, flags);
     if (virtVmNum < 0 || (virtVmNum > 0 && virtVmInfo == nullptr)) {
+        if (failure != nullptr) {
+            *failure = {MigrationStage::None, MigrationSide::Unknown, MigrationOperation::LookupDomain,
+                        virtVmNum < 0 ? MigrationErrorOrigin::Libvirt : MigrationErrorOrigin::Internal,
+                        virtVmNum < 0, virtVmNum < 0 ? virtVmNum : 0};
+        }
         VIRTRUST_LOG_ERROR("|DomainList|END|returnF||failed to get virsh domains");
         FreeDescription(&tsbVmInfo);
         return VirtrustRc::ERROR;
@@ -972,12 +1011,17 @@ VirtrustRc DomainList(const std::unique_ptr<ConnCtx> &conn, unsigned int flags,
 }
 
 // 入口预检查均在向守护进程发起 UDS 请求之前完成，不会启动迁移副作用。
-static MigrationResult MigrationPreflightFailure()
+static MigrationResult MigrationPreflightFailure(MigrationError failure = {})
 {
     MigrationResult result;
     result.outcome = MigrationOutcome::FailedBeforeEffect;
-    result.primaryError = {MigrationStage::Preflight, MigrationSide::Source, MigrationOperation::Validate,
-                           MigrationErrorOrigin::Validation, false, 0};
+    if (failure.operation == MigrationOperation::None) {
+        failure = {MigrationStage::Preflight, MigrationSide::Source, MigrationOperation::Validate,
+                   MigrationErrorOrigin::Validation, false, 0};
+    }
+    failure.stage = MigrationStage::Preflight;
+    failure.side = MigrationSide::Source;
+    result.primaryError = failure;
     result.hasPrimaryError = true;
     result.manualCheckRequired = false;
     return result;
@@ -1015,10 +1059,11 @@ MigrationResult DomainMigrate(const std::unique_ptr<ConnCtx> &conn, const std::s
     std::unordered_map<std::string, DomainInfo> domainInfos;
     // 此处先确定请求目标 UUID；守护进程取得独占资格后还会复核，不能依赖此查询防并发变化。
     // 查询全部状态并进行一致性检查，随后仅选择已关机目标；收窄查询范围须另行评估检查语义。
-    auto ret = DomainList(conn, LIST_DOMAINS_ACTIVE | LIST_DOMAINS_INACTIVE, domainInfos, false);
+    MigrationError queryFailure;
+    auto ret = DomainList(conn, LIST_DOMAINS_ACTIVE | LIST_DOMAINS_INACTIVE, domainInfos, false, &queryFailure);
     if (ret != VirtrustRc::OK) {
         VIRTRUST_LOG_ERROR("|DomainMigrate|END|returnF|failed to get domainInfos");
-        return MigrationPreflightFailure();
+        return MigrationPreflightFailure(queryFailure);
     }
     std::string uuid;
     bool exists = std::any_of(domainInfos.begin(), domainInfos.end(), [&domainName, &uuid](const auto &pair) {

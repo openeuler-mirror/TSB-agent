@@ -5,6 +5,7 @@
 #include "virtrust/link/migration_session.h"
 
 #include <iostream>
+#include <cstdlib>
 #include <memory>
 #include <mutex>
 #include <utility>
@@ -531,32 +532,25 @@ MigrateSessionRc MigrationSession::GetExchangePkAndReport(protos::EXchangePkAndR
 
     VIRTRUST_LOG_DEBUG("|domain name: {}|TSB: MigrationGetCert start.", domainName_);
     int ret = MigrationGetCert(uuid.data(), &cert, &certLen, &pubKey, &pubKeyLen);
-    if (ret != 0 || cert == nullptr || pubKey == nullptr) {
-        // 底层返回成功但输出为空时也属错误，不能虚构一个 TSB 原始错误码。
+    // 底层通过 malloc 转交所有权；先接管两个缓冲区，后续校验或字符串分配异常都能释放。
+    std::unique_ptr<char, decltype(&std::free)> certOwner(cert, &std::free);
+    std::unique_ptr<char, decltype(&std::free)> pubKeyOwner(pubKey, &std::free);
+    if (ret != 0 || cert == nullptr || pubKey == nullptr || certLen <= 0 || pubKeyLen <= 0) {
+        // 底层返回成功但输出无效时也属错误，不能虚构一个 TSB 原始错误码。
         RecordFailure(MigrationStage::KeyExchange,
                       role_ == Role::Initiator ? MigrationSide::Source : MigrationSide::Destination,
                       MigrationOperation::GetCertificate,
                       ret != 0 ? MigrationErrorOrigin::Tsb : MigrationErrorOrigin::Internal, ret != 0, ret);
-        if (cert != nullptr) {
-            free(cert);
-            cert = nullptr;
-        }
-        if (pubKey != nullptr) {
-            free(pubKey);
-            pubKey = nullptr;
-        }
         VIRTRUST_LOG_ERROR("|GetExchangePkAndReport|END|returnF|domain name: {}|TSB: MigrationGetCert failed.",
                            domainName_);
         return MigrateSessionRc::ERROR;
     }
     VIRTRUST_LOG_DEBUG("|domain name: {}|TSB: MigrationGetCert success.", domainName_);
 
-    std::string certStr(cert, certLen);
-    std::string pubKeyStr(pubKey, pubKeyLen);
-    free(cert);
-    cert = nullptr;
-    free(pubKey);
-    pubKey = nullptr;
+    std::string certStr(certOwner.get(), static_cast<size_t>(certLen));
+    std::string pubKeyStr(pubKeyOwner.get(), static_cast<size_t>(pubKeyLen));
+    certOwner.reset();
+    pubKeyOwner.reset();
 
     VIRTRUST_LOG_DEBUG("|domain name: {}|TSB: GetReport start.", domainName_);
     trust_report_new hostReport;
@@ -1096,7 +1090,11 @@ MigrateSessionRc MigrationSession::PrepareResponder()
     if (state_ != State::Init) {
         return MigrateSessionRc::ERROR;
     }
-    if (CheckMaxDomainCount() != VirtrustRc::OK) {
+    MigrationError capacityFailure;
+    if (CheckMaxDomainCount(&capacityFailure) != VirtrustRc::OK) {
+        RecordFailure(MigrationStage::Prepare, MigrationSide::Destination, capacityFailure.operation,
+                      capacityFailure.origin, capacityFailure.hasRawCode, capacityFailure.rawCode,
+                      MigrationOutcome::FailedBeforeEffect);
         return MigrateSessionRc::ERROR;
     }
     EnterState(State::WaitingKey);

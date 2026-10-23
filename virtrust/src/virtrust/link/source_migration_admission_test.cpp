@@ -107,7 +107,7 @@ protected:
         request_.set_uuid(UUID);
         request_.set_desturi("qemu+tls://192.168.1.100/system");
         request_.set_localuri("qemu:///system");
-        request_.set_flags(MIGRATE_UNDEFINE_SOURCE);
+        request_.set_flags(VIR_MIGRATE_OFFLINE | VIR_MIGRATE_PERSIST_DEST | MIGRATE_UNDEFINE_SOURCE);
     }
 
     void TearDown() override
@@ -208,6 +208,23 @@ TEST_F(SourceMigrationAdmissionTest, ChangedUuidFailsPrecheckAndReleasesAdmissio
               LockOutcome::Acquired);
 }
 
+TEST_F(SourceMigrationAdmissionTest, LibvirtListFailureReportsQueryOriginBeforeSession)
+{
+    ScopedDomainListFailure failedList;
+    const auto reply = MigrateReply();
+    EXPECT_EQ(reply.result(), static_cast<uint32_t>(VirtrustRc::ERROR));
+    ASSERT_TRUE(reply.has_diagnostic());
+    const auto &error = reply.diagnostic().primary_error();
+    EXPECT_EQ(reply.diagnostic().outcome(), protos::MIGRATION_OUTCOME_FAILED_BEFORE_EFFECT);
+    EXPECT_EQ(error.stage(), protos::MIGRATION_STAGE_PREFLIGHT);
+    EXPECT_EQ(error.operation(), protos::MIGRATION_OPERATION_LOOKUP_DOMAIN);
+    EXPECT_EQ(error.origin(), protos::MIGRATION_ERROR_ORIGIN_LIBVIRT);
+    EXPECT_TRUE(error.has_raw_code());
+    EXPECT_EQ(error.raw_code(), -1);
+    EXPECT_EQ(State().startCalls, 0);
+    EXPECT_EQ(SessionManager::GetInstance().GetSession(UUID), nullptr);
+}
+
 TEST_F(SourceMigrationAdmissionTest, ChangedNameWithSameUuidFailsPrecheck)
 {
     request_.set_domainname("test-domain-1");
@@ -283,6 +300,54 @@ TEST_F(SourceMigrationAdmissionTest, RejectsDestinationWithMalformedPort)
 {
     request_.set_desturi("qemu+tls://192.168.1.100:70000/system");
     EXPECT_EQ(Migrate(), static_cast<uint32_t>(VirtrustRc::ERROR));
+    EXPECT_EQ(State().admissionCalls, 0);
+    EXPECT_EQ(State().startCalls, 0);
+}
+
+// 非法标志必须在取得节点资格和访问 libvirt 之前被本机 UDS 入口拒绝。
+TEST_F(SourceMigrationAdmissionTest, RejectsUnsupportedFlagsBeforeAdmissionAndLibvirt)
+{
+    const unsigned int supportedFlags = VIR_MIGRATE_OFFLINE | VIR_MIGRATE_PERSIST_DEST | MIGRATE_UNDEFINE_SOURCE;
+    for (const unsigned int flags : {0U, supportedFlags & ~MIGRATE_UNDEFINE_SOURCE,
+                                     supportedFlags & ~VIR_MIGRATE_OFFLINE,
+                                     supportedFlags & ~VIR_MIGRATE_PERSIST_DEST,
+                                     supportedFlags | (1U << 31)}) {
+        SCOPED_TRACE(::testing::Message() << "flags=" << flags);
+        request_.set_flags(flags);
+        ScopedSourceConnectFailure failIfOpened;
+        const auto reply = MigrateReply();
+        EXPECT_EQ(reply.result(), static_cast<uint32_t>(VirtrustRc::ERROR));
+        ASSERT_TRUE(reply.has_diagnostic());
+        EXPECT_EQ(reply.diagnostic().outcome(), protos::MIGRATION_OUTCOME_FAILED_BEFORE_EFFECT);
+        EXPECT_EQ(reply.diagnostic().primary_error().stage(), protos::MIGRATION_STAGE_PREFLIGHT);
+        EXPECT_EQ(reply.diagnostic().primary_error().side(), protos::MIGRATION_SIDE_SOURCE);
+        EXPECT_EQ(reply.diagnostic().primary_error().operation(), protos::MIGRATION_OPERATION_VALIDATE);
+        EXPECT_EQ(reply.diagnostic().primary_error().origin(), protos::MIGRATION_ERROR_ORIGIN_VALIDATION);
+        EXPECT_EQ(reply.diagnostic().confirmed_steps(), 0U);
+        EXPECT_FALSE(reply.diagnostic().manual_check_required());
+        EXPECT_EQ(State().admissionCalls, 0);
+        EXPECT_EQ(State().startCalls, 0);
+        EXPECT_EQ(failIfOpened.Calls(), 0);
+        EXPECT_EQ(SessionManager::GetInstance().GetSession(UUID), nullptr);
+    }
+}
+
+// 诊断日志失败不能改变已确定的非法标志预检查结果。
+TEST_F(SourceMigrationAdmissionTest, UnsupportedFlagsRemainPreflightFailureWhenLoggingThrows)
+{
+    request_.set_flags(0);
+    Logger::Instance()->SetCustomLogFunction([](LogLevel level, std::string_view) {
+        if (level == LogLevel::ERROR) {
+            throw std::bad_alloc();
+        }
+    });
+    const auto reply = MigrateReply();
+    ASSERT_TRUE(reply.has_diagnostic());
+    EXPECT_EQ(reply.result(), static_cast<uint32_t>(VirtrustRc::ERROR));
+    EXPECT_EQ(reply.diagnostic().outcome(), protos::MIGRATION_OUTCOME_FAILED_BEFORE_EFFECT);
+    EXPECT_EQ(reply.diagnostic().primary_error().stage(), protos::MIGRATION_STAGE_PREFLIGHT);
+    EXPECT_EQ(reply.diagnostic().primary_error().operation(), protos::MIGRATION_OPERATION_VALIDATE);
+    EXPECT_FALSE(reply.diagnostic().manual_check_required());
     EXPECT_EQ(State().admissionCalls, 0);
     EXPECT_EQ(State().startCalls, 0);
 }

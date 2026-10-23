@@ -297,11 +297,19 @@ extern "C" int __wrap_open(const char *path, int flags, ...)
 extern "C" int __real_GetVRoots(int *, Description **);
 extern "C" int __wrap_GetVRoots(int *count, Description **info)
 {
-    const auto &state = virtrust::test::AdmissionState();
+    auto &state = virtrust::test::AdmissionState();
     if (state.observedConnection != nullptr) {
         EXPECT_EQ(state.observedConnection->GetUri(), state.expectedUriBeforePreparation);
     }
-    ++virtrust::test::AdmissionState().businessCalls;
+    ++state.businessCalls;
+    if (state.malformedGetVRoots != 0) {
+        *count = state.malformedGetVRoots == 1 ? -1 : 1;
+        *info = nullptr;
+        return 0;
+    }
+    if (state.getVRootsOverride != 0) {
+        return state.getVRootsOverride;
+    }
     return __real_GetVRoots(count, info);
 }
 extern "C" int __real_StartVRoot(char *);

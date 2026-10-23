@@ -28,7 +28,8 @@ if(BUILD_TEST)
 endif()
 add_virtrust_test_if(migration_result_test)
 if(BUILD_TEST)
-  target_link_libraries(migration_result_test PRIVATE virtrust_proto Deps::secure_c)
+  target_link_libraries(migration_result_test PRIVATE virtrust_proto Deps::secure_c
+    absl_raw_logging_internal)
 endif()
 add_virtrust_test_if(grpc_client_test)
 if(BUILD_TEST)
@@ -61,7 +62,7 @@ if(BUILD_TEST AND ENABLE_MOCK_4_FUZZ)
 
   # 准入使用真实文件锁；通过包装入口注入准备、RPC、可信资源错误及确定性报告数据。
   # 会话对象单独编译，并捕获定时器回调，以验证源端 Prepare 决策和迟到回调的清理边界。
-  add_library(destination-migration-session-test-obj OBJECT migration_session.cpp)
+  add_library(destination-migration-session-test-obj OBJECT migration_session.cpp ../api/domain.cpp)
   target_include_directories(destination-migration-session-test-obj PRIVATE
     ${PROJECT_SOURCE_DIR}/src ${CMAKE_DEPS_INCLUDEDIR} ${CMAKE_BINARY_DIR}/src
     ${CMAKE_BINARY_DIR}/src/virtrust)
@@ -75,6 +76,8 @@ if(BUILD_TEST AND ENABLE_MOCK_4_FUZZ)
     "LINKER:--wrap=_ZN8virtrust16MigrationSession24OnMigrateRequestReceivedEv"
     "LINKER:--wrap=_ZN8virtrust16MigrationSession31OnStartMigrationRequestReceivedEv"
     "LINKER:--wrap=_ZN8virtrust16MigrationSession7CleanupEv"
+    "LINKER:--wrap=_ZNK8virtrust16MigrationSession10DiagnosticEv"
+    "LINKER:--wrap=_ZN8virtrust7ToProtoERKNS_15MigrationResultEPNS_6protos19MigrationDiagnosticE"
     "LINKER:--wrap=_ZN8virtrust13RpcClientMock16PrepareMigrationEjRKNS_6protos17PrepareMigRequestEPNS1_15PrepareMigReplyE"
     "LINKER:--wrap=_ZN8virtrust13RpcClientMock19ExchangePkAndReportEjRKNS_6protos26EXchangePkAndReportRequestEPNS1_24EXchangePkAndReportReplyE"
     "LINKER:--wrap=_ZN8virtrust13RpcClientMock14StartMigrationEjRKNS_6protos15StartMigRequestEPNS1_13StartMigReplyE"
@@ -89,6 +92,7 @@ if(BUILD_TEST AND ENABLE_MOCK_4_FUZZ)
     "LINKER:--wrap=GetReport")
   target_link_options(destination_migration_admission_test PRIVATE
     "LINKER:--wrap=MigrationGetCert"
+    "LINKER:--wrap=free"
     "LINKER:--wrap=MigrationCheckPeerPk"
     "LINKER:--wrap=VerifyTrustReport"
     "LINKER:--wrap=TransDupPub")

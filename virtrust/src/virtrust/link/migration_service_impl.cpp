@@ -26,18 +26,26 @@
 namespace virtrust {
 namespace {
 // API 的查询只用于构造请求；守护进程取得独占资格后再次核验，避免等待 UDS 时虚机已变化。
-bool CheckSourceDomain(const protos::DomainMigraterRequest &request)
+bool CheckSourceDomain(const protos::DomainMigraterRequest &request, MigrationError &failure)
 {
+    failure = {MigrationStage::Preflight, MigrationSide::Source, MigrationOperation::Validate,
+               MigrationErrorOrigin::Validation, false, 0};
     auto conn = std::make_unique<ConnCtx>();
     if (!conn->SetUri(request.localuri()) || !conn->Connect()) {
+        failure = {MigrationStage::Preflight, MigrationSide::Source, MigrationOperation::ConnectLibvirt,
+                   MigrationErrorOrigin::Libvirt, false, 0};
         VIRTRUST_LOG_ERROR("|DomainMigrate|Precheck|Failed to connect to source URI: {}", request.localuri());
         return false;
     }
     std::unordered_map<std::string, DomainInfo> domains;
-    if (DomainList(conn, LIST_DOMAINS_ACTIVE | LIST_DOMAINS_INACTIVE, domains, false) != VirtrustRc::OK) {
+    if (DomainList(conn, LIST_DOMAINS_ACTIVE | LIST_DOMAINS_INACTIVE, domains, false, &failure) != VirtrustRc::OK) {
+        failure.stage = MigrationStage::Preflight;
+        failure.side = MigrationSide::Source;
         VIRTRUST_LOG_ERROR("|DomainMigrate|Precheck|Failed to list source domains");
         return false;
     }
+    failure = {MigrationStage::Preflight, MigrationSide::Source, MigrationOperation::Validate,
+               MigrationErrorOrigin::Validation, false, 0};
     const auto it = domains.find(request.uuid());
     if (it == domains.end() || it->second.domainName != request.domainname() ||
         it->second.state != VIR_DOMAIN_SHUTOFF) {
@@ -127,14 +135,21 @@ void CleanupResponderSessionNoThrow(const std::shared_ptr<MigrationSession> &ses
 // 目的端会话若已失效或异常中断，就不能推断远端效果；保留已记录的更具体底层错误。
 template <typename Reply>
 void SetDestinationFailure(Reply *response, MigrationStage stage, MigrationOperation operation,
-                           MigrationErrorOrigin origin, const std::shared_ptr<MigrationSession> &session = {})
+                           MigrationErrorOrigin origin, const std::shared_ptr<MigrationSession> &session = {}) noexcept
 {
-    MigrationResult diagnostic = session ? session->Diagnostic() : MigrationResult{};
-    if (!diagnostic.hasPrimaryError) {
-        diagnostic.primaryError = {stage, MigrationSide::Destination, operation, origin, false, 0};
-        diagnostic.hasPrimaryError = true;
+    // 业务失败码先于可能分配内存的诊断写入，避免异常留下 protobuf 缺省成功码。
+    response->set_result(static_cast<uint32_t>(VirtrustRc::ERROR));
+    try {
+        MigrationResult diagnostic = session ? session->Diagnostic() : MigrationResult{};
+        if (!diagnostic.hasPrimaryError) {
+            diagnostic.primaryError = {stage, MigrationSide::Destination, operation, origin, false, 0};
+            diagnostic.hasPrimaryError = true;
+        }
+        ToProto(diagnostic, response->mutable_diagnostic());
+    } catch (...) {
+        // 无法完整序列化时不留下半份诊断；调用方仍可依据非零业务码判定失败。
+        response->clear_diagnostic();
     }
-    ToProto(diagnostic, response->mutable_diagnostic());
 }
 
 template <typename Action>
@@ -206,12 +221,14 @@ grpc::Status MigrationServiceImpl::PrepareMigration(grpc::ServerContext *context
         }
         if (session->OnMigrateRequestReceived() != MigrateSessionRc::OK) {
             // 预检查失败是终态；不能让无定时器的 Failed 会话永久持有节点资格。
-            MigrationResult diagnostic;
-            diagnostic.outcome = MigrationOutcome::FailedBeforeEffect;
-            diagnostic.manualCheckRequired = false;
-            diagnostic.primaryError = {MigrationStage::Prepare, MigrationSide::Destination,
-                                       MigrationOperation::Validate, MigrationErrorOrigin::Validation, false, 0};
-            diagnostic.hasPrimaryError = true;
+            MigrationResult diagnostic = session->Diagnostic();
+            if (!diagnostic.hasPrimaryError) {
+                diagnostic.outcome = MigrationOutcome::FailedBeforeEffect;
+                diagnostic.manualCheckRequired = false;
+                diagnostic.primaryError = {MigrationStage::Prepare, MigrationSide::Destination,
+                                           MigrationOperation::Validate, MigrationErrorOrigin::Validation, false, 0};
+                diagnostic.hasPrimaryError = true;
+            }
             ToProto(diagnostic, response->mutable_diagnostic());
             session->Cleanup();
             return grpc::Status::OK;
@@ -400,6 +417,18 @@ grpc::Status MigrationServiceImpl::DomainMigrate(grpc::ServerContext *context,
             VIRTRUST_LOG_ERROR("|MigrationServiceImpl DomainMigrate|DestinationUri|Invalid destination URI");
             return grpc::Status::OK;
         }
+        // 本机 UDS 入口独立约束标志，不能依赖调用方先经过 API 校验。
+        constexpr unsigned int supportedFlags = VIR_MIGRATE_OFFLINE | VIR_MIGRATE_PERSIST_DEST | MIGRATE_UNDEFINE_SOURCE;
+        if (request->flags() != supportedFlags) {
+            SetSourcePreflightFailure(response, VirtrustRc::ERROR, MigrationOperation::Validate,
+                                      MigrationErrorOrigin::Validation);
+            // 日志异常不能把已确定的预检查拒绝改写为未知业务结果。
+            try {
+                VIRTRUST_LOG_ERROR("|DomainMigrate|Flags|Unsupported migration flags: {}", request->flags());
+            } catch (...) {
+            }
+            return grpc::Status::OK;
+        }
 
         // 令牌由当前守护进程请求持有，直至源端状态机和 Cleanup 全部返回；不从 API 转移描述符。
         const auto outcome = admission.TryAcquire(AdmissionKind::Migration);
@@ -414,9 +443,10 @@ grpc::Status MigrationServiceImpl::DomainMigrate(grpc::ServerContext *context,
             }
             return grpc::Status::OK;
         }
-        if (!CheckSourceDomain(*request)) {
-            SetSourcePreflightFailure(response, VirtrustRc::ERROR, MigrationOperation::Validate,
-                                      MigrationErrorOrigin::Validation);
+        MigrationError sourceFailure;
+        if (!CheckSourceDomain(*request, sourceFailure)) {
+            SetSourcePreflightFailure(response, VirtrustRc::ERROR, sourceFailure.operation,
+                                      sourceFailure.origin, sourceFailure.hasRawCode, sourceFailure.rawCode);
             return grpc::Status::OK;
         }
 

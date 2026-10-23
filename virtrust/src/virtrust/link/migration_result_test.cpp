@@ -4,9 +4,9 @@
 
 #include "gtest/gtest.h"
 
-#include <google/protobuf/descriptor.h>
-
 #include <string>
+#include <type_traits>
+#include <utility>
 
 #include "tsb_agent/tsb_agent.h"
 #include "virtrust/link/migration_result.h"
@@ -146,15 +146,12 @@ TEST(MigrationResultTest, FailedBeforeEffectWithConfirmedStepBecomesUnknown)
     EXPECT_TRUE(decoded.manualCheckRequired);
 }
 
-TEST(MigrationResultTest, ErrorClassificationUsesProtoEnums)
-{
-    const auto *descriptor = protos::MigrationErrorInfo::descriptor();
-    for (const char *name : {"stage", "side", "operation", "origin"}) {
-        const auto *field = descriptor->FindFieldByName(name);
-        ASSERT_NE(field, nullptr);
-        EXPECT_EQ(field->type(), google::protobuf::FieldDescriptor::TYPE_ENUM);
-    }
-}
+// 编译期检查协议字段类型，避免测试为反射接口额外依赖 protobuf/Abseil 的内部链接库。
+using ErrorInfo = protos::MigrationErrorInfo;
+static_assert(std::is_same_v<decltype(std::declval<const ErrorInfo &>().stage()), protos::MigrationStageCode>);
+static_assert(std::is_same_v<decltype(std::declval<const ErrorInfo &>().side()), protos::MigrationSideCode>);
+static_assert(std::is_same_v<decltype(std::declval<const ErrorInfo &>().operation()), protos::MigrationOperationCode>);
+static_assert(std::is_same_v<decltype(std::declval<const ErrorInfo &>().origin()), protos::MigrationErrorOriginCode>);
 
 TEST(MigrationResultTest, FormatsPartialFailureWithoutSensitivePayload)
 {

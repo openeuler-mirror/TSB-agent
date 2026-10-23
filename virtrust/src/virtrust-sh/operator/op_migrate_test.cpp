@@ -133,6 +133,45 @@ TEST(OpMigrateTest, RejectsRemoteSourceBeforeConnecting)
     EXPECT_EQ(connection.Calls(), 0);
 }
 
+TEST(OpMigrateTest, ConnectionFailurePrintsStructuredPreflightWithoutUri)
+{
+    ScopedMigrationConnectFailure connection;
+    ScopedMigrationResultInjection injection;
+    OpMigrate operation;
+    OpConfig config;
+    config.uri = "qemu:///system";
+    operation.SetConfig(config);
+    testing::internal::CaptureStderr();
+    const auto rc = operation.Exec();
+    const std::string output = testing::internal::GetCapturedStderr();
+    EXPECT_EQ(rc, OpRc::ERROR);
+    EXPECT_EQ(connection.Calls(), 1);
+    EXPECT_EQ(MigrationCallCount(), 0);
+    EXPECT_NE(output.find("FAILED_BEFORE_EFFECT"), std::string::npos);
+    EXPECT_NE(output.find("PREFLIGHT"), std::string::npos);
+    EXPECT_NE(output.find("CONNECT_LIBVIRT"), std::string::npos);
+    EXPECT_NE(output.find("LIBVIRT"), std::string::npos);
+    EXPECT_EQ(output.find("qemu:///system"), std::string::npos);
+    EXPECT_EQ(output.find("raw_code="), std::string::npos);
+}
+
+TEST(OpMigrateTest, InvalidSourceUriPrintsValidationWithoutEchoingUri)
+{
+    ScopedMigrationConnectFailure connection;
+    OpMigrate operation;
+    OpConfig config;
+    config.uri = "qemu+ssh://secret@remote.example.com/system";
+    operation.SetConfig(config);
+    testing::internal::CaptureStderr();
+    const auto rc = operation.Exec();
+    const std::string output = testing::internal::GetCapturedStderr();
+    EXPECT_EQ(rc, OpRc::ERROR);
+    EXPECT_EQ(connection.Calls(), 0);
+    EXPECT_NE(output.find("FAILED_BEFORE_EFFECT"), std::string::npos);
+    EXPECT_NE(output.find("VALIDATION"), std::string::npos);
+    EXPECT_EQ(output.find("secret"), std::string::npos);
+}
+
 TEST(OpMigrateTest, RestoresConnectionHookAfterDiagnosticException)
 {
     {

@@ -80,11 +80,13 @@ VirtrustRc DomainUndefine(const std::unique_ptr<ConnCtx> &conn, const std::strin
  * @param conn 连接参数
  * @param flags
  * 见DomainListFlag选项，可组合LIST_DOMAINS_ACTIVE|LIST_DOMAINS_INACTIVE
- * @param dmoainInfos 查询到的虚拟机信息
+ * @param domainInfos 查询到的虚拟机信息
  * @param printErrToCli
  * 是否屏显tsb资源和libvirt资源不一致的错误信息，如果libvirt有但是tsb没有不会屏显，日志会有warn日志
+ * @param failure 可选的迁移预检查错误输出；普通调用方无需传入
  * @return VirtrustRc
  */
 VirtrustRc DomainList(const std::unique_ptr<ConnCtx> &conn, unsigned int flags,
-                      std::unordered_map<std::string, DomainInfo> &domainInfos, bool printErrToCli = false);
+                      std::unordered_map<std::string, DomainInfo> &domainInfos, bool printErrToCli = false,
+                      MigrationError *failure = nullptr);
 } // namespace virtrust

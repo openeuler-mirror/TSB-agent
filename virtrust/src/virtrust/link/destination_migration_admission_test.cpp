@@ -7,6 +7,7 @@
 #include <unistd.h>
 
 #include <chrono>
+#include <climits>
 #include <cstring>
 #include <cstdlib>
 #include <filesystem>
@@ -35,6 +36,8 @@ struct DestinationTestState {
     bool useRealPrepare = false;
     bool throwOnPrepare = false;
     bool throwOnStart = false;
+    bool throwOnDiagnostic = false;
+    bool throwOnDiagnosticSerialization = false;
     bool throwOnAcquire = false;
     bool useRealClientPrepare = false;
     bool failSourcePrepareTransport = false;
@@ -56,10 +59,18 @@ struct DestinationTestState {
     bool injectSourceCipherLength = false;
     int sourceCipherLength = 0;
     bool failSourceDescriptionFetch = false;
+    int forcedRootCount = -1;
     bool sourceTimeoutObservedInLibvirt = false;
     bool captureTimers = false;
     bool failCipherImport = false;
     bool failGetCert = false;
+    // INT_MIN 表示不覆盖底层返回的长度。
+    int certLengthOverride = INT_MIN;
+    int publicKeyLengthOverride = INT_MIN;
+    void *trackedCert = nullptr;
+    void *trackedPublicKey = nullptr;
+    int certFreeCalls = 0;
+    int publicKeyFreeCalls = 0;
     bool failGetReport = false;
     bool failPeerCertificate = false;
     bool failPeerReport = false;
@@ -426,6 +437,77 @@ TEST_F(DestinationMigrationAdmissionTest, PreparePrecheckFailureReportsNoEffectD
     EXPECT_EQ(SessionManager::GetInstance().GetSession("destination-test-1"), nullptr);
 }
 
+TEST_F(DestinationMigrationAdmissionTest, PrepareTsbQueryFailureKeepsOriginAndRawCode)
+{
+    State().useRealPrepare = true;
+    State().failSourceDescriptionFetch = true;
+    protos::PrepareMigRequest request;
+    request.set_uuid("destination-test-1");
+    request.set_domainname("test-domain");
+    protos::PrepareMigReply reply;
+    ASSERT_TRUE(service_.PrepareMigration(nullptr, &request, &reply).ok());
+    EXPECT_EQ(reply.result(), static_cast<uint32_t>(VirtrustRc::ERROR));
+    const auto diagnostic = FromProto(reply.diagnostic(), VirtrustRc::ERROR);
+    EXPECT_EQ(diagnostic.outcome, MigrationOutcome::FailedBeforeEffect);
+    ASSERT_TRUE(diagnostic.hasPrimaryError);
+    EXPECT_EQ(diagnostic.primaryError.stage, MigrationStage::Prepare);
+    EXPECT_EQ(diagnostic.primaryError.operation, MigrationOperation::GetDescription);
+    EXPECT_EQ(diagnostic.primaryError.origin, MigrationErrorOrigin::Tsb);
+    EXPECT_TRUE(diagnostic.primaryError.hasRawCode);
+    EXPECT_EQ(diagnostic.primaryError.rawCode, ERR_FILE_LOCK);
+    EXPECT_EQ(SessionManager::GetInstance().GetSession("destination-test-1"), nullptr);
+    EXPECT_EQ(OrdinaryProbe(), LockOutcome::Acquired);
+}
+
+TEST_F(DestinationMigrationAdmissionTest, PrepareCapacityLimitRemainsValidation)
+{
+    State().useRealPrepare = true;
+    State().forcedRootCount = 32;
+    protos::PrepareMigRequest request;
+    request.set_uuid("destination-test-1");
+    request.set_domainname("test-domain");
+    protos::PrepareMigReply reply;
+    ASSERT_TRUE(service_.PrepareMigration(nullptr, &request, &reply).ok());
+    EXPECT_EQ(reply.result(), static_cast<uint32_t>(VirtrustRc::ERROR));
+    const auto diagnostic = FromProto(reply.diagnostic(), VirtrustRc::ERROR);
+    EXPECT_EQ(diagnostic.outcome, MigrationOutcome::FailedBeforeEffect);
+    ASSERT_TRUE(diagnostic.hasPrimaryError);
+    EXPECT_EQ(diagnostic.primaryError.operation, MigrationOperation::Validate);
+    EXPECT_EQ(diagnostic.primaryError.origin, MigrationErrorOrigin::Validation);
+    EXPECT_FALSE(diagnostic.primaryError.hasRawCode);
+    EXPECT_EQ(SessionManager::GetInstance().GetSession("destination-test-1"), nullptr);
+}
+
+TEST_F(DestinationMigrationAdmissionTest, ZeroLengthCertificateIsRejectedAndBuffersReleased)
+{
+    State().certLengthOverride = 0;
+    const auto reply = ExchangeAfterPrepare("destination-test-1");
+    EXPECT_EQ(reply.result(), static_cast<uint32_t>(VirtrustRc::ERROR));
+    const auto diagnostic = FromProto(reply.diagnostic(), VirtrustRc::ERROR);
+    ASSERT_TRUE(diagnostic.hasPrimaryError);
+    EXPECT_EQ(diagnostic.primaryError.operation, MigrationOperation::GetCertificate);
+    EXPECT_EQ(diagnostic.primaryError.origin, MigrationErrorOrigin::Internal);
+    EXPECT_FALSE(diagnostic.primaryError.hasRawCode);
+    EXPECT_EQ(State().certFreeCalls, 1);
+    EXPECT_EQ(State().publicKeyFreeCalls, 1);
+    EXPECT_EQ(State().getReportCalls, 0);
+}
+
+TEST_F(DestinationMigrationAdmissionTest, NegativePublicKeyLengthIsRejectedAndBuffersReleased)
+{
+    State().publicKeyLengthOverride = -1;
+    const auto reply = ExchangeAfterPrepare("destination-test-1");
+    EXPECT_EQ(reply.result(), static_cast<uint32_t>(VirtrustRc::ERROR));
+    const auto diagnostic = FromProto(reply.diagnostic(), VirtrustRc::ERROR);
+    ASSERT_TRUE(diagnostic.hasPrimaryError);
+    EXPECT_EQ(diagnostic.primaryError.operation, MigrationOperation::GetCertificate);
+    EXPECT_EQ(diagnostic.primaryError.origin, MigrationErrorOrigin::Internal);
+    EXPECT_FALSE(diagnostic.primaryError.hasRawCode);
+    EXPECT_EQ(State().certFreeCalls, 1);
+    EXPECT_EQ(State().publicKeyFreeCalls, 1);
+    EXPECT_EQ(State().getReportCalls, 0);
+}
+
 TEST_F(DestinationMigrationAdmissionTest, FailureNotificationReleasesAdmission)
 {
     ASSERT_EQ(Prepare("destination-test-1"), 0U);
@@ -454,6 +536,35 @@ TEST_F(DestinationMigrationAdmissionTest, OutOfOrderRpcAbortsSessionAndReleasesA
     EXPECT_EQ(diagnostic.primaryError.operation, MigrationOperation::Validate);
     EXPECT_EQ(SessionManager::GetInstance().GetSession("destination-test-1"), nullptr);
     EXPECT_EQ(OrdinaryProbe(), LockOutcome::Acquired);
+}
+
+TEST_F(DestinationMigrationAdmissionTest, DiagnosticSnapshotFailureCannotReturnDefaultSuccess)
+{
+    State().useRealPrepare = true;
+    ASSERT_EQ(Prepare("destination-test-1"), 0U);
+    State().throwOnDiagnostic = true;
+    protos::StartMigRequest request;
+    request.set_uuid("destination-test-1");
+    protos::StartMigReply reply;
+    EXPECT_NO_THROW({ EXPECT_TRUE(service_.StartMigration(nullptr, &request, &reply).ok()); });
+    EXPECT_EQ(reply.result(), static_cast<uint32_t>(VirtrustRc::ERROR));
+    EXPECT_FALSE(reply.has_diagnostic());
+    EXPECT_EQ(SessionManager::GetInstance().GetSession("destination-test-1"), nullptr);
+    EXPECT_EQ(OrdinaryProbe(), LockOutcome::Acquired);
+}
+
+TEST_F(DestinationMigrationAdmissionTest, DiagnosticSerializationFailureCannotReturnDefaultSuccess)
+{
+    State().useRealPrepare = true;
+    ASSERT_EQ(Prepare("destination-test-1"), 0U);
+    State().throwOnDiagnosticSerialization = true;
+    protos::StartMigRequest request;
+    request.set_uuid("destination-test-1");
+    protos::StartMigReply reply;
+    EXPECT_NO_THROW({ EXPECT_TRUE(service_.StartMigration(nullptr, &request, &reply).ok()); });
+    EXPECT_EQ(reply.result(), static_cast<uint32_t>(VirtrustRc::ERROR));
+    EXPECT_FALSE(reply.has_diagnostic());
+    EXPECT_EQ(SessionManager::GetInstance().GetSession("destination-test-1"), nullptr);
 }
 
 TEST_F(DestinationMigrationAdmissionTest, DirectResponderStepFailureIsTerminalBeforeReturn)
@@ -1836,6 +1947,31 @@ extern "C" void WrappedDestinationCleanup(virtrust::MigrationSession *session)
     RealDestinationCleanup(session);
 }
 
+extern "C" virtrust::MigrationResult RealDestinationDiagnostic(const virtrust::MigrationSession *)
+    asm("__real__ZNK8virtrust16MigrationSession10DiagnosticEv");
+extern "C" virtrust::MigrationResult WrappedDestinationDiagnostic(const virtrust::MigrationSession *)
+    asm("__wrap__ZNK8virtrust16MigrationSession10DiagnosticEv");
+extern "C" virtrust::MigrationResult WrappedDestinationDiagnostic(const virtrust::MigrationSession *session)
+{
+    if (virtrust::State().throwOnDiagnostic) {
+        throw std::bad_alloc();
+    }
+    return RealDestinationDiagnostic(session);
+}
+
+extern "C" void RealDestinationToProto(const virtrust::MigrationResult &, virtrust::protos::MigrationDiagnostic *)
+    asm("__real__ZN8virtrust7ToProtoERKNS_15MigrationResultEPNS_6protos19MigrationDiagnosticE");
+extern "C" void WrappedDestinationToProto(const virtrust::MigrationResult &, virtrust::protos::MigrationDiagnostic *)
+    asm("__wrap__ZN8virtrust7ToProtoERKNS_15MigrationResultEPNS_6protos19MigrationDiagnosticE");
+extern "C" void WrappedDestinationToProto(const virtrust::MigrationResult &diagnostic,
+                                            virtrust::protos::MigrationDiagnostic *reply)
+{
+    if (virtrust::State().throwOnDiagnosticSerialization) {
+        throw std::bad_alloc();
+    }
+    RealDestinationToProto(diagnostic, reply);
+}
+
 extern "C" int32_t RealDestinationClientPrepare(virtrust::RpcClientMock *, uint32_t,
     const virtrust::protos::PrepareMigRequest &, virtrust::protos::PrepareMigReply *)
     asm("__real__ZN8virtrust13RpcClientMock16PrepareMigrationEjRKNS_6protos17PrepareMigRequestEPNS1_15PrepareMigReplyE");
@@ -2022,6 +2158,12 @@ extern "C" int WrappedSourceDescriptionFetch(int *count, Description **items)
     if (virtrust::State().failSourceDescriptionFetch) {
         return ERR_FILE_LOCK;
     }
+    if (virtrust::State().forcedRootCount >= 0) {
+        *count = virtrust::State().forcedRootCount;
+        *items = *count == 0 ? nullptr :
+            static_cast<Description *>(calloc(static_cast<size_t>(*count), sizeof(Description)));
+        return *count == 0 || *items != nullptr ? 0 : -1;
+    }
     return RealSourceDescriptionFetch(count, items);
 }
 
@@ -2125,7 +2267,32 @@ extern "C" int WrappedDestinationGetCert(char *uuid, char **cert, int *certLen, 
     if (virtrust::State().failGetCert) {
         return -71;
     }
-    return RealDestinationGetCert(uuid, cert, certLen, pubKey, pubKeyLen);
+    const int result = RealDestinationGetCert(uuid, cert, certLen, pubKey, pubKeyLen);
+    if (result == 0 && (virtrust::State().certLengthOverride != INT_MIN ||
+                        virtrust::State().publicKeyLengthOverride != INT_MIN)) {
+        virtrust::State().trackedCert = *cert;
+        virtrust::State().trackedPublicKey = *pubKey;
+        if (virtrust::State().certLengthOverride != INT_MIN) {
+            *certLen = virtrust::State().certLengthOverride;
+        }
+        if (virtrust::State().publicKeyLengthOverride != INT_MIN) {
+            *pubKeyLen = virtrust::State().publicKeyLengthOverride;
+        }
+    }
+    return result;
+}
+
+extern "C" void __real_free(void *);
+// 只统计测试中由 MigrationGetCert 返回的两个缓冲区，其他 free 仍透传原函数。
+extern "C" void __wrap_free(void *memory)
+{
+    if (memory != nullptr && memory == virtrust::State().trackedCert) {
+        ++virtrust::State().certFreeCalls;
+    }
+    if (memory != nullptr && memory == virtrust::State().trackedPublicKey) {
+        ++virtrust::State().publicKeyFreeCalls;
+    }
+    __real_free(memory);
 }
 
 extern "C" int RealDestinationCheckPeerPk(char *, char *, char *) asm("__real_MigrationCheckPeerPk");
