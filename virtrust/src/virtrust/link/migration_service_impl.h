@@ -11,12 +11,14 @@
 #include <thread>
 
 #include "virtrust/link/defines.h"
+#include "virtrust/link/migration_replay_cache.h"
 
 #include "virtrust/link/proto/migrate.grpc.pb.h"
 
 namespace virtrust {
 class MigrationServiceImpl final : public protos::MigrationService::Service {
 public:
+    MigrationServiceImpl();
     // 1: 准备迁移
     grpc::Status PrepareMigration(grpc::ServerContext *context, const protos::PrepareMigRequest *request,
                                   protos::PrepareMigReply *response) override;
@@ -40,5 +42,22 @@ public:
     // 6: 发起迁移任务
     grpc::Status DomainMigrate(grpc::ServerContext *context, const protos::DomainMigraterRequest *request,
                                protos::DomainMigraterReply *response) override;
+
+private:
+    // 缓存仅随此服务实例存活；所有跨节点阶段必须先通过同一去重入口。
+    MigrationReplayCache replayCache_;
+
+    grpc::Status PrepareMigrationUncached(grpc::ServerContext *context, const protos::PrepareMigRequest *request,
+                                          protos::PrepareMigReply *response);
+    grpc::Status ExchangePkAndReportUncached(grpc::ServerContext *context,
+                                             const protos::EXchangePkAndReportRequest *request,
+                                             protos::EXchangePkAndReportReply *response);
+    grpc::Status StartMigrationUncached(grpc::ServerContext *context, const protos::StartMigRequest *request,
+                                        protos::StartMigReply *response);
+    grpc::Status SendVRsourceDataUncached(grpc::ServerContext *context, const protos::VRsourceInfoRequest *request,
+                                          protos::VRsourceInfoReply *response);
+    grpc::Status NotifyVRMigrateResultUncached(grpc::ServerContext *context,
+                                               const protos::MigrateResultRequest *request,
+                                               protos::MigrateResultReply *response);
 };
 } // namespace virtrust

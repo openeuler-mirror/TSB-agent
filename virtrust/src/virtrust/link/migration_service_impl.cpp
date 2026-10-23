@@ -6,6 +6,7 @@
 
 #include <memory>
 #include <exception>
+#include <chrono>
 #include <thread>
 #include <unordered_map>
 #include <utility>
@@ -172,11 +173,123 @@ MigrateSessionRc RunResponderStep(const std::shared_ptr<MigrationSession> &sessi
     }
     return MigrateSessionRc::ERROR;
 }
+
+bool ValidAttemptId(const std::string &id) noexcept
+{
+    if (id.size() != 32) {
+        return false;
+    }
+    for (const char value : id) {
+        if (!((value >= '0' && value <= '9') || (value >= 'a' && value <= 'f'))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// 入口先判重，再运行原有业务；完整请求与回复序列化后用于同阶段结果回放。
+template <typename Request, typename Reply, typename Action>
+grpc::Status RunCached(MigrationReplayCache &cache, MigrationReplayCache::Step step,
+                       const Request *request, Reply *response, Action &&action)
+{
+    if (request == nullptr || response == nullptr) {
+        return {grpc::StatusCode::INVALID_ARGUMENT, "Migration request or reply is null"};
+    }
+    if (!ValidAttemptId(request->attempt_id())) {
+        return {grpc::StatusCode::INVALID_ARGUMENT, "Migration attempt ID is missing or invalid"};
+    }
+    MigrationReplayCache::Admission admission;
+    try {
+        // 比较完整请求字节而非仅比较 UUID：同一尝试同一阶段若更换密文、证书等负载必须拒绝。
+        // 这里只做缓存键比对，不替代 gRPC 在网络上的 protobuf 编解码。
+        std::string requestBytes;
+        if (!request->SerializeToString(&requestBytes)) {
+            return {grpc::StatusCode::INTERNAL, "Failed to serialize migration request"};
+        }
+        admission = cache.Begin(request->attempt_id(), step, requestBytes);
+        switch (admission.decision) {
+            case MigrationReplayCache::Decision::Replay:
+                // 旧成功回复不能越过同 UUID 已登记的新尝试；无会话时允许重放收尾回复。
+                if (const auto current = SessionManager::GetInstance().GetSession(request->uuid());
+                    current != nullptr && current->AttemptId() != request->attempt_id()) {
+                    return {grpc::StatusCode::FAILED_PRECONDITION,
+                            "Migration attempt does not match current session"};
+                }
+                if (!response->ParseFromString(admission.reply)) {
+                    return {grpc::StatusCode::INTERNAL, "Failed to restore migration reply"};
+                }
+                return grpc::Status::OK;
+            case MigrationReplayCache::Decision::InProgress:
+                // 首个处理尚未完成，不能猜测其结果，也不能并发再次进入有副作用的业务。
+                return {grpc::StatusCode::ABORTED, "Migration step is already in progress"};
+            case MigrationReplayCache::Decision::Conflict:
+                // 尝试身份和阶段相同但负载不同，不把它当作合法重试。
+                return {grpc::StatusCode::FAILED_PRECONDITION, "Migration step payload conflicts with prior request"};
+            case MigrationReplayCache::Decision::Capacity:
+                return {grpc::StatusCode::RESOURCE_EXHAUSTED, "Migration replay cache is full"};
+            case MigrationReplayCache::Decision::Unavailable:
+                return {grpc::StatusCode::ABORTED, "Migration step result is unavailable for replay"};
+            case MigrationReplayCache::Decision::Execute:
+                break;
+        }
+        const auto status = std::forward<Action>(action)();
+        // 会话可能已在业务动作中清理；保存完整回复才能在会话消失后重放最终确认或错误诊断。
+        std::string replyBytes;
+        if (!response->SerializeToString(&replyBytes)) {
+            cache.CompleteUnreplayable(admission);
+            return {grpc::StatusCode::INTERNAL, "Failed to serialize migration reply"};
+        }
+        if (!cache.Complete(admission, replyBytes)) {
+            // 副作用可能已完成；保留墓碑并返回真实首发结果，重复请求将收到不可回放错误。
+            try {
+                VIRTRUST_LOG_ERROR("Migration replay result could not be retained: attempt={}, step={}",
+                                   request->attempt_id(), static_cast<int>(step));
+            } catch (...) {
+            }
+        }
+        return status;
+    } catch (...) {
+        // 已进入业务后出现异常，保留不可回放墓碑；绝不因缓存失败重新执行业务。
+        if (admission.decision == MigrationReplayCache::Decision::Execute) {
+            cache.CompleteUnreplayable(admission);
+        }
+        return {grpc::StatusCode::INTERNAL, "Migration replay boundary failed"};
+    }
+}
+
+template <typename Reply>
+bool MatchResponderAttempt(const std::shared_ptr<MigrationSession> &session, const std::string &attemptId,
+                           Reply *response, MigrationStage stage)
+{
+    // 无会话仍交由旧路径给出明确的缺失诊断；只有活跃会话才比较尝试身份。
+    if (session == nullptr || session->AttemptId() == attemptId) {
+        return true;
+    }
+    SetDestinationFailure(response, stage, MigrationOperation::CheckIdentity,
+                          MigrationErrorOrigin::Validation);
+    return false;
+}
 } // namespace
+
+MigrationServiceImpl::MigrationServiceImpl()
+    // 服务实例覆盖 gRPC Server 生命周期，缓存跨请求存在；活跃会话的旧阶段不按 TTL 淘汰。
+    : replayCache_(256, 16 * 1024 * 1024, std::chrono::minutes(10),
+                   [](const std::string &attemptId) {
+                       return SessionManager::GetInstance().HasAttempt(attemptId);
+                   })
+{}
 
 grpc::Status MigrationServiceImpl::PrepareMigration(grpc::ServerContext *context,
                                                     const protos::PrepareMigRequest *request,
                                                     protos::PrepareMigReply *response)
+{
+    return RunCached(replayCache_, MigrationReplayCache::Step::Prepare, request, response,
+                     [&] { return PrepareMigrationUncached(context, request, response); });
+}
+
+grpc::Status MigrationServiceImpl::PrepareMigrationUncached(grpc::ServerContext *context,
+                                                            const protos::PrepareMigRequest *request,
+                                                            protos::PrepareMigReply *response)
 {
     if (request == nullptr || response == nullptr) {
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "Migration preparation request or reply is null");
@@ -210,8 +323,10 @@ grpc::Status MigrationServiceImpl::PrepareMigration(grpc::ServerContext *context
         }
 
         auto &mgr = SessionManager::GetInstance();
+        // Prepare 是目的端会话身份的唯一建档点；后续 RPC 只读取并校验，不能覆盖该身份。
         session = mgr.CreateSession(MigrationSession::Role::Responder, request->uuid(), request->domainname(),
-                                    request->desturi(), request->localuri(), request->flags(), std::move(admission));
+                                    request->desturi(), request->localuri(), request->flags(), std::move(admission),
+                                    request->attempt_id());
         if (session == nullptr) {
             VIRTRUST_LOG_ERROR("|PrepareMigration|END|returnF|domain name: {}|Session already exists",
                                request->domainname());
@@ -263,9 +378,20 @@ grpc::Status MigrationServiceImpl::ExchangePkAndReport(grpc::ServerContext *cont
                                                        const protos::EXchangePkAndReportRequest *request,
                                                        protos::EXchangePkAndReportReply *response)
 {
+    return RunCached(replayCache_, MigrationReplayCache::Step::Exchange, request, response,
+                     [&] { return ExchangePkAndReportUncached(context, request, response); });
+}
+
+grpc::Status MigrationServiceImpl::ExchangePkAndReportUncached(grpc::ServerContext *context,
+                                                               const protos::EXchangePkAndReportRequest *request,
+                                                               protos::EXchangePkAndReportReply *response)
+{
     auto &uuid = request->uuid();
     auto &domainName = request->domainname();
     auto session = SessionManager::GetInstance().GetSession(uuid);
+    if (!MatchResponderAttempt(session, request->attempt_id(), response, MigrationStage::KeyExchange)) {
+        return grpc::Status::OK;
+    }
     if (session == nullptr) {
         VIRTRUST_LOG_ERROR("|ExchangePkAndReport|END|returnF|domain name: {}|Can't find session.", domainName);
         SetDestinationFailure(response, MigrationStage::KeyExchange, MigrationOperation::Validate,
@@ -293,9 +419,20 @@ grpc::Status MigrationServiceImpl::ExchangePkAndReport(grpc::ServerContext *cont
 grpc::Status MigrationServiceImpl::StartMigration(grpc::ServerContext *context, const protos::StartMigRequest *request,
                                                   protos::StartMigReply *response)
 {
+    return RunCached(replayCache_, MigrationReplayCache::Step::Start, request, response,
+                     [&] { return StartMigrationUncached(context, request, response); });
+}
+
+grpc::Status MigrationServiceImpl::StartMigrationUncached(grpc::ServerContext *context,
+                                                          const protos::StartMigRequest *request,
+                                                          protos::StartMigReply *response)
+{
     auto &uuid = request->uuid();
     auto &domainName = request->domainname();
     auto session = SessionManager::GetInstance().GetSession(uuid);
+    if (!MatchResponderAttempt(session, request->attempt_id(), response, MigrationStage::Start)) {
+        return grpc::Status::OK;
+    }
     if (session == nullptr) {
         VIRTRUST_LOG_ERROR("|StartMigration|END|returnF|domain name: {}|Can't find session.", domainName);
         SetDestinationFailure(response, MigrationStage::Start, MigrationOperation::Validate,
@@ -324,6 +461,14 @@ grpc::Status MigrationServiceImpl::SendVRsourceData(grpc::ServerContext *context
                                                     const protos::VRsourceInfoRequest *request,
                                                     protos::VRsourceInfoReply *response)
 {
+    return RunCached(replayCache_, MigrationReplayCache::Step::Transfer, request, response,
+                     [&] { return SendVRsourceDataUncached(context, request, response); });
+}
+
+grpc::Status MigrationServiceImpl::SendVRsourceDataUncached(grpc::ServerContext *context,
+                                                            const protos::VRsourceInfoRequest *request,
+                                                            protos::VRsourceInfoReply *response)
+{
     if (request == nullptr) {
         VIRTRUST_LOG_ERROR("|SendVRsourceData|END|returnF||request is nullptr.");
         response->set_result(1);
@@ -331,6 +476,9 @@ grpc::Status MigrationServiceImpl::SendVRsourceData(grpc::ServerContext *context
     }
     auto &uuid = request->uuid();
     auto session = SessionManager::GetInstance().GetSession(uuid);
+    if (!MatchResponderAttempt(session, request->attempt_id(), response, MigrationStage::DataTransfer)) {
+        return grpc::Status::OK;
+    }
     if (session == nullptr) {
         VIRTRUST_LOG_ERROR("|SendVRsourceData|END|returnF|uuid: {}|Can't find session.", uuid);
         SetDestinationFailure(response, MigrationStage::DataTransfer, MigrationOperation::Validate,
@@ -359,6 +507,14 @@ grpc::Status MigrationServiceImpl::NotifyVRMigrateResult(grpc::ServerContext *co
                                                          const protos::MigrateResultRequest *request,
                                                          protos::MigrateResultReply *response)
 {
+    return RunCached(replayCache_, MigrationReplayCache::Step::Finish, request, response,
+                     [&] { return NotifyVRMigrateResultUncached(context, request, response); });
+}
+
+grpc::Status MigrationServiceImpl::NotifyVRMigrateResultUncached(grpc::ServerContext *context,
+                                                                 const protos::MigrateResultRequest *request,
+                                                                 protos::MigrateResultReply *response)
+{
     if (request == nullptr) {
         VIRTRUST_LOG_ERROR("|DomainMigrate|END|returnF|NotifyVRMigrateResult request is nullptr.");
         response->set_result(1);
@@ -366,6 +522,9 @@ grpc::Status MigrationServiceImpl::NotifyVRMigrateResult(grpc::ServerContext *co
     }
     auto &uuid = request->uuid();
     auto session = SessionManager::GetInstance().GetSession(uuid);
+    if (!MatchResponderAttempt(session, request->attempt_id(), response, MigrationStage::DestinationCommit)) {
+        return grpc::Status::OK;
+    }
     if (session == nullptr) {
         VIRTRUST_LOG_ERROR("|StartMigration|END|returnF|NotifyVRMigrateResult uuid: {}|Can't find session.", uuid);
         SetDestinationFailure(response, MigrationStage::DestinationCommit, MigrationOperation::Validate,

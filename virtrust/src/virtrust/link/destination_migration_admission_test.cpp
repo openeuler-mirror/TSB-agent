@@ -29,6 +29,19 @@
 
 namespace virtrust {
 namespace {
+// 测试请求按 UUID 固定尝试身份，使不同阶段同属一次迁移、不同虚机不发生缓存键冲突。
+std::string TestAttemptId(const std::string &uuid)
+{
+    constexpr char digits[] = "0123456789abcdef";
+    const auto value = std::hash<std::string>{}(uuid);
+    std::string id(32, '0');
+    for (size_t index = 0; index < 16; ++index) {
+        id[index] = digits[(value >> (index * 4 % (sizeof(size_t) * 8))) & 0x0f];
+        id[index + 16] = id[index];
+    }
+    return id;
+}
+
 struct DestinationTestState {
     std::string directory;
     std::string expectedOutstandingUuid;
@@ -98,6 +111,7 @@ struct DestinationTestState {
     int removeFailuresRemaining = 0;
     int undefineFailuresRemaining = 0;
     std::vector<std::string> sourceCompletionOrder;
+    std::vector<std::string> sourceAttemptIds;
     MigrationResult lastSourceDiagnostic;
     std::vector<std::function<void()>> timerCallbacks;
 };
@@ -246,10 +260,11 @@ protected:
         State() = {};
     }
 
-    uint32_t Prepare(const std::string &uuid)
+    uint32_t Prepare(const std::string &uuid, const std::string &attemptId = {})
     {
         protos::PrepareMigRequest request;
         request.set_uuid(uuid);
+        request.set_attempt_id(attemptId.empty() ? TestAttemptId(uuid) : attemptId);
         request.set_domainname("test-domain");
         protos::PrepareMigReply reply;
         const auto status = service_.PrepareMigration(nullptr, &request, &reply);
@@ -263,6 +278,7 @@ protected:
         EXPECT_EQ(Prepare(uuid), 0U);
         protos::EXchangePkAndReportRequest request;
         request.set_uuid(uuid);
+        request.set_attempt_id(TestAttemptId(request.uuid()));
         request.set_domainname("test-domain");
         protos::EXchangePkAndReportReply reply;
         EXPECT_TRUE(service_.ExchangePkAndReport(nullptr, &request, &reply).ok());
@@ -277,6 +293,7 @@ protected:
         }
         protos::EXchangePkAndReportRequest exchange;
         exchange.set_uuid(uuid);
+        exchange.set_attempt_id(TestAttemptId(exchange.uuid()));
         exchange.set_domainname("test-domain");
         protos::EXchangePkAndReportReply exchanged;
         if (!service_.ExchangePkAndReport(nullptr, &exchange, &exchanged).ok() || exchanged.result() != 0) {
@@ -292,6 +309,7 @@ protected:
         }
         protos::StartMigRequest start;
         start.set_uuid(uuid);
+        start.set_attempt_id(TestAttemptId(start.uuid()));
         start.set_domainname("test-domain");
         protos::StartMigReply started;
         return service_.StartMigration(nullptr, &start, &started).ok() && started.result() == 0;
@@ -304,6 +322,7 @@ protected:
         }
         protos::VRsourceInfoRequest request;
         request.set_uuid(uuid);
+        request.set_attempt_id(TestAttemptId(request.uuid()));
         request.set_cipherdata("cipher");
         request.mutable_vtpcminfo()->set_name("test-domain");
         request.mutable_vtpcminfo()->set_uuid(uuid);
@@ -368,6 +387,116 @@ TEST_F(DestinationMigrationAdmissionTest, PrepareHoldsExclusiveAcrossRpcBoundary
     State().expectedOutstandingUuid = "destination-test-1";
 }
 
+TEST_F(DestinationMigrationAdmissionTest, RepeatedPrepareReplaysReplyWithoutRefreshingSession)
+{
+    State().useRealPrepare = true;
+    State().captureTimers = true;
+    ASSERT_EQ(Prepare("destination-test-1"), 0U);
+    auto session = SessionManager::GetInstance().GetSession("destination-test-1");
+    ASSERT_NE(session, nullptr);
+    ASSERT_EQ(State().timerCallbacks.size(), 1U);
+    EXPECT_EQ(Prepare("destination-test-1"), 0U);
+    EXPECT_EQ(SessionManager::GetInstance().GetSession("destination-test-1"), session);
+    EXPECT_EQ(State().timerCallbacks.size(), 1U);
+    State().expectedOutstandingUuid = "destination-test-1";
+}
+
+TEST_F(DestinationMigrationAdmissionTest, OldPrepareReplyIsNotReplayedIntoReplacementSession)
+{
+    ASSERT_EQ(Prepare("destination-test-1"), 0U);
+    auto first = SessionManager::GetInstance().GetSession("destination-test-1");
+    ASSERT_NE(first, nullptr);
+    first->Cleanup();
+    ASSERT_EQ(Prepare("destination-test-1", TestAttemptId("replacement-attempt")), 0U);
+    auto replacement = SessionManager::GetInstance().GetSession("destination-test-1");
+    ASSERT_NE(replacement, nullptr);
+
+    protos::PrepareMigRequest oldRequest;
+    oldRequest.set_uuid("destination-test-1");
+    oldRequest.set_attempt_id(TestAttemptId(oldRequest.uuid()));
+    oldRequest.set_domainname("test-domain");
+    protos::PrepareMigReply reply;
+    EXPECT_EQ(service_.PrepareMigration(nullptr, &oldRequest, &reply).error_code(),
+              grpc::StatusCode::FAILED_PRECONDITION);
+    EXPECT_EQ(SessionManager::GetInstance().GetSession("destination-test-1"), replacement);
+    State().expectedOutstandingUuid = "destination-test-1";
+}
+
+TEST_F(DestinationMigrationAdmissionTest, ChangedPreparePayloadAndMissingAttemptAreRejected)
+{
+    ASSERT_EQ(Prepare("destination-test-1"), 0U);
+    auto session = SessionManager::GetInstance().GetSession("destination-test-1");
+    ASSERT_NE(session, nullptr);
+    protos::PrepareMigRequest changed;
+    changed.set_uuid("destination-test-1");
+    changed.set_attempt_id(TestAttemptId(changed.uuid()));
+    changed.set_domainname("changed-name");
+    protos::PrepareMigReply reply;
+    EXPECT_EQ(service_.PrepareMigration(nullptr, &changed, &reply).error_code(),
+              grpc::StatusCode::FAILED_PRECONDITION);
+    changed.clear_attempt_id();
+    EXPECT_EQ(service_.PrepareMigration(nullptr, &changed, &reply).error_code(),
+              grpc::StatusCode::INVALID_ARGUMENT);
+    EXPECT_EQ(SessionManager::GetInstance().GetSession("destination-test-1"), session);
+    State().expectedOutstandingUuid = "destination-test-1";
+}
+
+TEST_F(DestinationMigrationAdmissionTest, StaleAttemptCannotEnterCurrentResponderSession)
+{
+    ASSERT_EQ(Prepare("destination-test-1"), 0U);
+    auto session = SessionManager::GetInstance().GetSession("destination-test-1");
+    ASSERT_NE(session, nullptr);
+    protos::StartMigRequest request;
+    request.set_uuid("destination-test-1");
+    request.set_attempt_id(TestAttemptId("old-attempt"));
+    protos::StartMigReply reply;
+    ASSERT_TRUE(service_.StartMigration(nullptr, &request, &reply).ok());
+    EXPECT_EQ(reply.result(), static_cast<uint32_t>(VirtrustRc::ERROR));
+    EXPECT_EQ(State().getReportCalls, 0);
+    EXPECT_EQ(SessionManager::GetInstance().GetSession("destination-test-1"), session);
+    State().expectedOutstandingUuid = "destination-test-1";
+}
+
+TEST_F(DestinationMigrationAdmissionTest, RepeatedExchangeReplaysWithoutFetchingReportsAgain)
+{
+    constexpr const char *uuid = "12345678-1234-1234-1234-123456789010";
+    const auto first = ExchangeAfterPrepare(uuid);
+    ASSERT_EQ(first.result(), static_cast<uint32_t>(VirtrustRc::OK));
+    const auto reportCalls = State().getReportCalls;
+    auto session = SessionManager::GetInstance().GetSession(uuid);
+    ASSERT_NE(session, nullptr);
+    protos::EXchangePkAndReportRequest request;
+    request.set_uuid(uuid);
+    request.set_attempt_id(TestAttemptId(uuid));
+    request.set_domainname("test-domain");
+    protos::EXchangePkAndReportReply repeated;
+    ASSERT_TRUE(service_.ExchangePkAndReport(nullptr, &request, &repeated).ok());
+    EXPECT_EQ(repeated.SerializeAsString(), first.SerializeAsString());
+    EXPECT_EQ(State().getReportCalls, reportCalls);
+    EXPECT_EQ(SessionManager::GetInstance().GetSession(uuid), session);
+    State().expectedOutstandingUuid = uuid;
+}
+
+TEST_F(DestinationMigrationAdmissionTest, RepeatedStartReplaysWithoutRefreshingTimer)
+{
+    constexpr const char *uuid = "12345678-1234-1234-1234-123456789010";
+    State().captureTimers = true;
+    ASSERT_TRUE(AdvanceToTransferring(uuid));
+    const auto timerCount = State().timerCallbacks.size();
+    auto session = SessionManager::GetInstance().GetSession(uuid);
+    ASSERT_NE(session, nullptr);
+    protos::StartMigRequest request;
+    request.set_uuid(uuid);
+    request.set_attempt_id(TestAttemptId(uuid));
+    request.set_domainname("test-domain");
+    protos::StartMigReply repeated;
+    ASSERT_TRUE(service_.StartMigration(nullptr, &request, &repeated).ok());
+    EXPECT_EQ(repeated.result(), static_cast<uint32_t>(VirtrustRc::OK));
+    EXPECT_EQ(State().timerCallbacks.size(), timerCount);
+    EXPECT_EQ(SessionManager::GetInstance().GetSession(uuid), session);
+    State().expectedOutstandingUuid = uuid;
+}
+
 TEST_F(DestinationMigrationAdmissionTest, OrdinaryMutationBlocksPreparation)
 {
     NodeAdmission ordinary;
@@ -376,7 +505,7 @@ TEST_F(DestinationMigrationAdmissionTest, OrdinaryMutationBlocksPreparation)
     EXPECT_EQ(Prepare("destination-test-1"), static_cast<uint32_t>(VirtrustRc::BUSY));
     EXPECT_EQ(SessionManager::GetInstance().GetSession("destination-test-1"), nullptr);
     ordinary.Release();
-    EXPECT_EQ(Prepare("destination-test-1"), 0U);
+    EXPECT_EQ(Prepare("destination-test-1", TestAttemptId("second-attempt")), 0U);
     State().expectedOutstandingUuid = "destination-test-1";
 }
 
@@ -387,6 +516,7 @@ TEST_F(DestinationMigrationAdmissionTest, PrepareBusyReportsNoEffectDiagnostic)
               LockOutcome::Acquired);
     protos::PrepareMigRequest request;
     request.set_uuid("destination-test-1");
+    request.set_attempt_id(TestAttemptId(request.uuid()));
     request.set_domainname("test-domain");
     protos::PrepareMigReply reply;
 
@@ -423,6 +553,7 @@ TEST_F(DestinationMigrationAdmissionTest, PreparePrecheckFailureReportsNoEffectD
     State().failPrepare = true;
     protos::PrepareMigRequest request;
     request.set_uuid("destination-test-1");
+    request.set_attempt_id(TestAttemptId(request.uuid()));
     request.set_domainname("test-domain");
     protos::PrepareMigReply reply;
 
@@ -443,6 +574,7 @@ TEST_F(DestinationMigrationAdmissionTest, PrepareTsbQueryFailureKeepsOriginAndRa
     State().failSourceDescriptionFetch = true;
     protos::PrepareMigRequest request;
     request.set_uuid("destination-test-1");
+    request.set_attempt_id(TestAttemptId(request.uuid()));
     request.set_domainname("test-domain");
     protos::PrepareMigReply reply;
     ASSERT_TRUE(service_.PrepareMigration(nullptr, &request, &reply).ok());
@@ -465,6 +597,7 @@ TEST_F(DestinationMigrationAdmissionTest, PrepareCapacityLimitRemainsValidation)
     State().forcedRootCount = 32;
     protos::PrepareMigRequest request;
     request.set_uuid("destination-test-1");
+    request.set_attempt_id(TestAttemptId(request.uuid()));
     request.set_domainname("test-domain");
     protos::PrepareMigReply reply;
     ASSERT_TRUE(service_.PrepareMigration(nullptr, &request, &reply).ok());
@@ -514,6 +647,7 @@ TEST_F(DestinationMigrationAdmissionTest, FailureNotificationReleasesAdmission)
     EXPECT_EQ(OrdinaryProbe(), LockOutcome::Busy);
     protos::MigrateResultRequest request;
     request.set_uuid("destination-test-1");
+    request.set_attempt_id(TestAttemptId(request.uuid()));
     request.set_result(1);
     protos::MigrateResultReply reply;
     EXPECT_TRUE(service_.NotifyVRMigrateResult(nullptr, &request, &reply).ok());
@@ -527,6 +661,7 @@ TEST_F(DestinationMigrationAdmissionTest, OutOfOrderRpcAbortsSessionAndReleasesA
     ASSERT_EQ(Prepare("destination-test-1"), 0U);
     protos::StartMigRequest request;
     request.set_uuid("destination-test-1");
+    request.set_attempt_id(TestAttemptId(request.uuid()));
     protos::StartMigReply reply;
     EXPECT_TRUE(service_.StartMigration(nullptr, &request, &reply).ok());
     EXPECT_EQ(reply.result(), static_cast<uint32_t>(VirtrustRc::ERROR));
@@ -545,6 +680,7 @@ TEST_F(DestinationMigrationAdmissionTest, DiagnosticSnapshotFailureCannotReturnD
     State().throwOnDiagnostic = true;
     protos::StartMigRequest request;
     request.set_uuid("destination-test-1");
+    request.set_attempt_id(TestAttemptId(request.uuid()));
     protos::StartMigReply reply;
     EXPECT_NO_THROW({ EXPECT_TRUE(service_.StartMigration(nullptr, &request, &reply).ok()); });
     EXPECT_EQ(reply.result(), static_cast<uint32_t>(VirtrustRc::ERROR));
@@ -560,6 +696,7 @@ TEST_F(DestinationMigrationAdmissionTest, DiagnosticSerializationFailureCannotRe
     State().throwOnDiagnosticSerialization = true;
     protos::StartMigRequest request;
     request.set_uuid("destination-test-1");
+    request.set_attempt_id(TestAttemptId(request.uuid()));
     protos::StartMigReply reply;
     EXPECT_NO_THROW({ EXPECT_TRUE(service_.StartMigration(nullptr, &request, &reply).ok()); });
     EXPECT_EQ(reply.result(), static_cast<uint32_t>(VirtrustRc::ERROR));
@@ -600,6 +737,7 @@ TEST_F(DestinationMigrationAdmissionTest, FailureMarksTerminalBeforeCleanupBound
     State().probeAtCleanup = true;
     protos::StartMigRequest request;
     request.set_uuid("destination-test-1");
+    request.set_attempt_id(TestAttemptId(request.uuid()));
     protos::StartMigReply reply;
     ASSERT_TRUE(service_.StartMigration(nullptr, &request, &reply).ok());
     EXPECT_EQ(reply.result(), static_cast<uint32_t>(VirtrustRc::ERROR));
@@ -662,13 +800,14 @@ TEST_F(DestinationMigrationAdmissionTest, StaleResponderEntryCannotAffectReplace
     auto stale = SessionManager::GetInstance().GetSession("destination-test-1");
     ASSERT_NE(stale, nullptr);
     stale->Cleanup();
-    ASSERT_EQ(Prepare("destination-test-1"), 0U);
+    ASSERT_EQ(Prepare("destination-test-1", TestAttemptId("replacement-attempt")), 0U);
     auto replacement = SessionManager::GetInstance().GetSession("destination-test-1");
     ASSERT_NE(replacement, nullptr);
     ASSERT_NE(replacement, stale);
 
     protos::EXchangePkAndReportRequest request;
     request.set_uuid("destination-test-1");
+    request.set_attempt_id(TestAttemptId(request.uuid()));
     protos::EXchangePkAndReportReply reply;
     EXPECT_EQ(stale->OnExchangeKeyRequestReceived(&request, &reply), MigrateSessionRc::ERROR);
     EXPECT_EQ(State().getReportCalls, 0);
@@ -682,6 +821,7 @@ TEST_F(DestinationMigrationAdmissionTest, TransferHandlerFailureReleasesAdmissio
     ASSERT_EQ(Prepare("destination-test-1"), 0U);
     protos::VRsourceInfoRequest request;
     request.set_uuid("destination-test-1");
+    request.set_attempt_id(TestAttemptId(request.uuid()));
     protos::VRsourceInfoReply reply;
     // 准备后的 Init 状态不允许直接导入，业务错误必须立刻结束会话。
     EXPECT_TRUE(service_.SendVRsourceData(nullptr, &request, &reply).ok());
@@ -699,6 +839,7 @@ TEST_F(DestinationMigrationAdmissionTest, ExchangeHandlerFailureReleasesAdmissio
     ASSERT_EQ(Prepare("destination-test-1"), 0U);
     protos::EXchangePkAndReportRequest request;
     request.set_uuid("destination-test-1");
+    request.set_attempt_id(TestAttemptId(request.uuid()));
     protos::EXchangePkAndReportReply reply;
     // Init 状态收到交换密钥请求时，真实会话处理函数应报错并触发统一清理。
     EXPECT_TRUE(service_.ExchangePkAndReport(nullptr, &request, &reply).ok());
@@ -785,6 +926,7 @@ TEST_F(DestinationMigrationAdmissionTest, InvalidImportedDescriptionReleasesAdmi
     ASSERT_TRUE(AdvanceToTransferring(uuid));
     protos::VRsourceInfoRequest request;
     request.set_uuid(uuid);
+    request.set_attempt_id(TestAttemptId(request.uuid()));
     request.set_cipherdata("cipher");
     request.mutable_vtpcminfo()->set_name("test-domain");
     request.mutable_vtpcminfo()->set_uuid(std::string(38, 'x'));
@@ -808,6 +950,7 @@ TEST_F(DestinationMigrationAdmissionTest, TransferRejectsMismatchedDescriptionUu
     ASSERT_TRUE(AdvanceToTransferring(uuid));
     protos::VRsourceInfoRequest request;
     request.set_uuid(uuid);
+    request.set_attempt_id(TestAttemptId(request.uuid()));
     request.set_cipherdata("cipher");
     request.mutable_vtpcminfo()->set_name("test-domain");
     request.mutable_vtpcminfo()->set_uuid("destination-test-2");
@@ -830,6 +973,7 @@ TEST_F(DestinationMigrationAdmissionTest, TransferRejectsMismatchedDescriptionNa
     ASSERT_TRUE(AdvanceToTransferring(uuid));
     protos::VRsourceInfoRequest request;
     request.set_uuid(uuid);
+    request.set_attempt_id(TestAttemptId(request.uuid()));
     request.set_cipherdata("cipher");
     request.mutable_vtpcminfo()->set_name("other-domain");
     request.mutable_vtpcminfo()->set_uuid(uuid);
@@ -854,6 +998,7 @@ TEST_F(DestinationMigrationAdmissionTest, TransferRejectsMismatchedRequestUuidBe
     ASSERT_NE(session, nullptr);
     protos::VRsourceInfoRequest request;
     request.set_uuid("destination-test-2");
+    request.set_attempt_id(TestAttemptId(request.uuid()));
     request.set_cipherdata("cipher");
     request.mutable_vtpcminfo()->set_name("test-domain");
     request.mutable_vtpcminfo()->set_uuid(uuid);
@@ -874,6 +1019,7 @@ TEST_F(DestinationMigrationAdmissionTest, TransferAcceptsSourceUuidWithTerminalN
     ASSERT_TRUE(AdvanceToTransferring(uuid));
     protos::VRsourceInfoRequest request;
     request.set_uuid(uuid);
+    request.set_attempt_id(TestAttemptId(request.uuid()));
     request.set_cipherdata("cipher");
     request.mutable_vtpcminfo()->set_name("test-domain");
     std::string descriptionUuid(uuid);
@@ -899,6 +1045,7 @@ TEST_F(DestinationMigrationAdmissionTest, CipherImportFailureReleasesAdmission)
     State().failCipherImport = true;
     protos::VRsourceInfoRequest request;
     request.set_uuid(uuid);
+    request.set_attempt_id(TestAttemptId(request.uuid()));
     request.set_cipherdata("cipher");
     request.mutable_vtpcminfo()->set_name("test-domain");
     request.mutable_vtpcminfo()->set_uuid(uuid);
@@ -917,6 +1064,7 @@ TEST_F(DestinationMigrationAdmissionTest, CipherImportFailureReturnsTsbDiagnosti
     State().failCipherImport = true;
     protos::VRsourceInfoRequest request;
     request.set_uuid(uuid);
+    request.set_attempt_id(TestAttemptId(request.uuid()));
     request.set_cipherdata("cipher");
     request.mutable_vtpcminfo()->set_name("test-domain");
     request.mutable_vtpcminfo()->set_uuid(uuid);
@@ -942,6 +1090,7 @@ TEST_F(DestinationMigrationAdmissionTest, CreateVrootFailureReleasesAdmission)
     ASSERT_TRUE(AdvanceToTransferring(uuid));
     protos::VRsourceInfoRequest request;
     request.set_uuid(uuid);
+    request.set_attempt_id(TestAttemptId(request.uuid()));
     request.set_cipherdata("cipher");
     request.mutable_vtpcminfo()->set_name("test-domain");
     request.mutable_vtpcminfo()->set_uuid(uuid);
@@ -965,6 +1114,7 @@ TEST_F(DestinationMigrationAdmissionTest, SuccessNotificationFailureStillRelease
     ASSERT_TRUE(AdvanceToAwaitingFinish(uuid));
     protos::MigrateResultRequest request;
     request.set_uuid(uuid);
+    request.set_attempt_id(TestAttemptId(request.uuid()));
     request.set_result(0);
     protos::MigrateResultReply reply;
     EXPECT_TRUE(service_.NotifyVRMigrateResult(nullptr, &request, &reply).ok());
@@ -992,6 +1142,7 @@ TEST_F(DestinationMigrationAdmissionTest, ImportCompletionAllowsSuccessNotificat
     EXPECT_EQ(OrdinaryProbe(), LockOutcome::Busy);
     protos::MigrateResultRequest request;
     request.set_uuid(uuid);
+    request.set_attempt_id(TestAttemptId(request.uuid()));
     request.set_result(0);
     protos::MigrateResultReply reply;
     ASSERT_TRUE(service_.NotifyVRMigrateResult(nullptr, &request, &reply).ok());
@@ -1001,12 +1152,58 @@ TEST_F(DestinationMigrationAdmissionTest, ImportCompletionAllowsSuccessNotificat
     EXPECT_EQ(OrdinaryProbe(), LockOutcome::Acquired);
 }
 
+TEST_F(DestinationMigrationAdmissionTest, FinalReplyReplaysAfterSessionCleanup)
+{
+    constexpr const char *uuid = "12345678-1234-1234-1234-123456789010";
+    State().acceptSuccessNotification = true;
+    ASSERT_TRUE(AdvanceToAwaitingFinish(uuid));
+    protos::MigrateResultRequest request;
+    request.set_uuid(uuid);
+    request.set_attempt_id(TestAttemptId(uuid));
+    request.set_result(0);
+    protos::MigrateResultReply first;
+    ASSERT_TRUE(service_.NotifyVRMigrateResult(nullptr, &request, &first).ok());
+    ASSERT_EQ(first.result(), static_cast<uint32_t>(VirtrustRc::OK));
+    ASSERT_EQ(SessionManager::GetInstance().GetSession(uuid), nullptr);
+    protos::MigrateResultReply repeated;
+    ASSERT_TRUE(service_.NotifyVRMigrateResult(nullptr, &request, &repeated).ok());
+    EXPECT_EQ(repeated.SerializeAsString(), first.SerializeAsString());
+    EXPECT_EQ(State().successNotificationCalls, 1);
+}
+
+TEST_F(DestinationMigrationAdmissionTest, OldFinalReplyIsNotReplayedIntoReplacementSession)
+{
+    constexpr const char *uuid = "12345678-1234-1234-1234-123456789010";
+    State().acceptSuccessNotification = true;
+    ASSERT_TRUE(AdvanceToAwaitingFinish(uuid));
+    protos::MigrateResultRequest request;
+    request.set_uuid(uuid);
+    request.set_attempt_id(TestAttemptId(uuid));
+    request.set_result(0);
+    protos::MigrateResultReply first;
+    ASSERT_TRUE(service_.NotifyVRMigrateResult(nullptr, &request, &first).ok());
+    ASSERT_EQ(SessionManager::GetInstance().GetSession(uuid), nullptr);
+
+    // 此处只测试身份隔离，新会话预检查由其他用例覆盖。
+    State().useRealPrepare = false;
+    ASSERT_EQ(Prepare(uuid, TestAttemptId("replacement-after-finish")), 0U);
+    auto replacement = SessionManager::GetInstance().GetSession(uuid);
+    ASSERT_NE(replacement, nullptr);
+    protos::MigrateResultReply repeated;
+    EXPECT_EQ(service_.NotifyVRMigrateResult(nullptr, &request, &repeated).error_code(),
+              grpc::StatusCode::FAILED_PRECONDITION);
+    EXPECT_EQ(SessionManager::GetInstance().GetSession(uuid), replacement);
+    EXPECT_EQ(State().successNotificationCalls, 1);
+    State().expectedOutstandingUuid = uuid;
+}
+
 TEST_F(DestinationMigrationAdmissionTest, FailureNotificationAfterImportReleasesAdmission)
 {
     constexpr const char *uuid = "12345678-1234-1234-1234-123456789010";
     ASSERT_TRUE(AdvanceToAwaitingFinish(uuid));
     protos::MigrateResultRequest request;
     request.set_uuid(uuid);
+    request.set_attempt_id(TestAttemptId(request.uuid()));
     request.set_result(1);
     protos::MigrateResultReply reply;
     ASSERT_TRUE(service_.NotifyVRMigrateResult(nullptr, &request, &reply).ok());
@@ -1036,6 +1233,7 @@ TEST_F(DestinationMigrationAdmissionTest, SuccessNotificationBeforeImportIsRejec
     // 预置 UUID 使底层 mock 通知可成功；业务必须先拒绝尚未导入资源的成功通知。
     protos::MigrateResultRequest request;
     request.set_uuid(uuid);
+    request.set_attempt_id(TestAttemptId(request.uuid()));
     request.set_result(0);
     protos::MigrateResultReply reply;
     EXPECT_TRUE(service_.NotifyVRMigrateResult(nullptr, &request, &reply).ok());
@@ -1056,6 +1254,7 @@ TEST_F(DestinationMigrationAdmissionTest, SuccessNotificationInInitialStateIsRej
     ASSERT_EQ(Prepare(uuid), 0U);
     protos::MigrateResultRequest request;
     request.set_uuid(uuid);
+    request.set_attempt_id(TestAttemptId(request.uuid()));
     request.set_result(0);
     protos::MigrateResultReply reply;
     ASSERT_TRUE(service_.NotifyVRMigrateResult(nullptr, &request, &reply).ok());
@@ -1071,6 +1270,7 @@ TEST_F(DestinationMigrationAdmissionTest, SuccessNotificationBeforeStartIsReject
     ASSERT_TRUE(AdvanceToCertVerify(uuid));
     protos::MigrateResultRequest request;
     request.set_uuid(uuid);
+    request.set_attempt_id(TestAttemptId(request.uuid()));
     request.set_result(0);
     protos::MigrateResultReply reply;
     ASSERT_TRUE(service_.NotifyVRMigrateResult(nullptr, &request, &reply).ok());
@@ -1086,6 +1286,7 @@ TEST_F(DestinationMigrationAdmissionTest, SuccessNotificationDuringTransferIsRej
     ASSERT_TRUE(AdvanceToTransferring(uuid));
     protos::MigrateResultRequest request;
     request.set_uuid(uuid);
+    request.set_attempt_id(TestAttemptId(request.uuid()));
     request.set_result(0);
     protos::MigrateResultReply reply;
     ASSERT_TRUE(service_.NotifyVRMigrateResult(nullptr, &request, &reply).ok());
@@ -1095,21 +1296,24 @@ TEST_F(DestinationMigrationAdmissionTest, SuccessNotificationDuringTransferIsRej
     EXPECT_EQ(OrdinaryProbe(), LockOutcome::Acquired);
 }
 
-TEST_F(DestinationMigrationAdmissionTest, DuplicateTransferAfterImportDoesNotRepeatCipherImport)
+TEST_F(DestinationMigrationAdmissionTest, DuplicateTransferAfterImportReplaysWithoutRepeatingCipherImport)
 {
     constexpr const char *uuid = "12345678-1234-1234-1234-123456789010";
     ASSERT_TRUE(AdvanceToAwaitingFinish(uuid));
     ASSERT_EQ(State().cipherImportCalls, 1);
     protos::VRsourceInfoRequest request;
     request.set_uuid(uuid);
+    request.set_attempt_id(TestAttemptId(request.uuid()));
     request.set_cipherdata("cipher");
     request.mutable_vtpcminfo()->set_name("test-domain");
     request.mutable_vtpcminfo()->set_uuid(uuid);
     protos::VRsourceInfoReply reply;
     ASSERT_TRUE(service_.SendVRsourceData(nullptr, &request, &reply).ok());
-    EXPECT_EQ(reply.result(), static_cast<uint32_t>(VirtrustRc::ERROR));
+    EXPECT_EQ(reply.result(), static_cast<uint32_t>(VirtrustRc::OK));
     EXPECT_EQ(State().cipherImportCalls, 1);
-    EXPECT_EQ(SessionManager::GetInstance().GetSession(uuid), nullptr);
+    auto session = SessionManager::GetInstance().GetSession(uuid);
+    ASSERT_NE(session, nullptr);
+    session->Cleanup();
     EXPECT_EQ(OrdinaryProbe(), LockOutcome::Acquired);
 }
 
@@ -1118,6 +1322,7 @@ TEST_F(DestinationMigrationAdmissionTest, PreparationExceptionReleasesAdmission)
     State().throwOnPrepare = true;
     protos::PrepareMigRequest request;
     request.set_uuid("destination-test-1");
+    request.set_attempt_id(TestAttemptId(request.uuid()));
     request.set_domainname("test-domain");
     protos::PrepareMigReply reply;
     ASSERT_TRUE(service_.PrepareMigration(nullptr, &request, &reply).ok());
@@ -1145,6 +1350,7 @@ TEST_F(DestinationMigrationAdmissionTest, RpcExceptionReleasesAdmission)
     State().throwOnStart = true;
     protos::StartMigRequest request;
     request.set_uuid("destination-test-1");
+    request.set_attempt_id(TestAttemptId(request.uuid()));
     protos::StartMigReply reply;
     grpc::Status status;
     EXPECT_NO_THROW(status = service_.StartMigration(nullptr, &request, &reply));
@@ -1162,6 +1368,7 @@ TEST_F(DestinationMigrationAdmissionTest, MissingExchangeSessionReturnsUnknownDi
 {
     protos::EXchangePkAndReportRequest request;
     request.set_uuid("destination-test-1");
+    request.set_attempt_id(TestAttemptId(request.uuid()));
     request.set_domainname("test-domain");
     protos::EXchangePkAndReportReply reply;
     ASSERT_TRUE(service_.ExchangePkAndReport(nullptr, &request, &reply).ok());
@@ -1184,6 +1391,7 @@ TEST_F(DestinationMigrationAdmissionTest, DiagnosticExceptionDoesNotRetainAdmiss
     });
     protos::StartMigRequest request;
     request.set_uuid("destination-test-1");
+    request.set_attempt_id(TestAttemptId(request.uuid()));
     protos::StartMigReply reply;
     EXPECT_NO_THROW((void)service_.StartMigration(nullptr, &request, &reply));
     EXPECT_EQ(reply.result(), static_cast<uint32_t>(VirtrustRc::ERROR));
@@ -1210,7 +1418,8 @@ TEST_F(DestinationMigrationAdmissionTest, TimerCallbackAndFailureNotificationCon
     State().useRealPrepare = true;
     State().captureTimers = true;
     for (int attempt = 0; attempt < 20; ++attempt) {
-        ASSERT_EQ(Prepare("destination-test-1"), 0U);
+        const auto attemptId = TestAttemptId("destination-test-1-" + std::to_string(attempt));
+        ASSERT_EQ(Prepare("destination-test-1", attemptId), 0U);
         auto session = SessionManager::GetInstance().GetSession("destination-test-1");
         ASSERT_NE(session, nullptr);
         ASSERT_FALSE(State().timerCallbacks.empty());
@@ -1218,6 +1427,7 @@ TEST_F(DestinationMigrationAdmissionTest, TimerCallbackAndFailureNotificationCon
 
         protos::MigrateResultRequest request;
         request.set_uuid("destination-test-1");
+        request.set_attempt_id(attemptId);
         request.set_result(1);
         protos::MigrateResultReply reply;
         // 两个终态入口竞速，验证最终会话已移除且资格可重新取得。
@@ -1259,7 +1469,7 @@ TEST_F(DestinationMigrationAdmissionTest, StaleTimerCallbackCannotCleanReplaceme
     auto staleCallback = State().timerCallbacks.front();
     stale->Cleanup();
 
-    ASSERT_EQ(Prepare("destination-test-1"), 0U);
+    ASSERT_EQ(Prepare("destination-test-1", TestAttemptId("timer-replacement")), 0U);
     auto replacement = SessionManager::GetInstance().GetSession("destination-test-1");
     ASSERT_NE(replacement, nullptr);
     ASSERT_NE(replacement, stale);
@@ -1652,6 +1862,17 @@ TEST_F(DestinationMigrationAdmissionTest, SourceWithoutUndefineFlagKeepsBothLoca
     EXPECT_EQ(State().undefineCalls, 0);
 }
 
+TEST_F(DestinationMigrationAdmissionTest, SourceUsesOneAttemptIdAcrossFivePeerStages)
+{
+    State().acceptSuccessNotification = true;
+    ASSERT_EQ(RunMockSource(), MigrateSessionRc::OK);
+    ASSERT_EQ(State().sourceAttemptIds.size(), 5U);
+    ASSERT_EQ(State().sourceAttemptIds.front().size(), 32U);
+    for (const auto &id : State().sourceAttemptIds) {
+        EXPECT_EQ(id, State().sourceAttemptIds.front());
+    }
+}
+
 TEST_F(DestinationMigrationAdmissionTest, RejectedDestinationConfirmationPreservesSourceResources)
 {
     State().rejectSourceFinish = true;
@@ -1941,6 +2162,7 @@ extern "C" void WrappedDestinationCleanup(virtrust::MigrationSession *session)
         virtrust::State().cleanupProbeRan = true;
         virtrust::protos::EXchangePkAndReportRequest request;
         request.set_uuid(session->Id());
+        request.set_attempt_id(virtrust::TestAttemptId(request.uuid()));
         virtrust::protos::EXchangePkAndReportReply reply;
         virtrust::State().cleanupProbeResult = session->OnExchangeKeyRequestReceived(&request, &reply);
     }
@@ -1981,6 +2203,7 @@ extern "C" int32_t WrappedDestinationClientPrepare(virtrust::RpcClientMock *, ui
 extern "C" int32_t WrappedDestinationClientPrepare(virtrust::RpcClientMock *self, uint32_t timeout,
     const virtrust::protos::PrepareMigRequest &request, virtrust::protos::PrepareMigReply *response)
 {
+    virtrust::State().sourceAttemptIds.push_back(request.attempt_id());
     if (virtrust::State().failSourcePrepareTransport) {
         ++virtrust::State().clientPrepareCalls;
         // 未收到业务回复时，零值 result 不得被源端解释为成功。
@@ -2025,6 +2248,7 @@ extern "C" int32_t WrappedDestinationClientExchange(virtrust::RpcClientMock *, u
 extern "C" int32_t WrappedDestinationClientExchange(virtrust::RpcClientMock *self, uint32_t timeout,
     const virtrust::protos::EXchangePkAndReportRequest &request, virtrust::protos::EXchangePkAndReportReply *response)
 {
+    virtrust::State().sourceAttemptIds.push_back(request.attempt_id());
     if (virtrust::State().failSourceExchangeTransport) {
         return virtrust::RPC_TRANSPORT_FAILURE;
     }
@@ -2056,6 +2280,7 @@ extern "C" int32_t WrappedDestinationClientStart(virtrust::RpcClientMock *, uint
 extern "C" int32_t WrappedDestinationClientStart(virtrust::RpcClientMock *self, uint32_t timeout,
     const virtrust::protos::StartMigRequest &request, virtrust::protos::StartMigReply *response)
 {
+    virtrust::State().sourceAttemptIds.push_back(request.attempt_id());
     if (virtrust::State().failSourceStartTransport) {
         return virtrust::RPC_TRANSPORT_FAILURE;
     }
@@ -2071,6 +2296,7 @@ extern "C" int32_t WrappedDestinationClientNotify(virtrust::RpcClientMock *, uin
 extern "C" int32_t WrappedDestinationClientNotify(virtrust::RpcClientMock *self, uint32_t timeout,
     const virtrust::protos::MigrateResultRequest &request, virtrust::protos::MigrateResultReply *response)
 {
+    virtrust::State().sourceAttemptIds.push_back(request.attempt_id());
     // 无论走哪条注入分支，都统计最终通知调用，避免未调用断言被默认 mock 路径掩盖。
     ++virtrust::State().clientNotifyCalls;
     if (virtrust::State().failSourceFailurePeerNotify && request.result() != 0) {
@@ -2121,6 +2347,7 @@ extern "C" int32_t WrappedDestinationClientTransfer(virtrust::RpcClientMock *, u
 extern "C" int32_t WrappedDestinationClientTransfer(virtrust::RpcClientMock *self, uint32_t timeout,
     const virtrust::protos::VRsourceInfoRequest &request, virtrust::protos::VRsourceInfoReply *response)
 {
+    virtrust::State().sourceAttemptIds.push_back(request.attempt_id());
     ++virtrust::State().sourceDataCalls;
     if (virtrust::State().sourceTransferTransportFailure) {
         return -1;

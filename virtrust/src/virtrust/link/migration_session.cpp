@@ -13,6 +13,7 @@
 #include "virtrust/api/define_private.h"
 #include "virtrust/base/logger.h"
 #include "virtrust/dllib/libvirt.h"
+#include "virtrust/link/migration_attempt_id.h"
 #include "virtrust/link/proto/proto_tools.h"
 
 #include "virtrust/link/proto/migrate.pb.h"
@@ -35,7 +36,7 @@ std::shared_ptr<MigrationSession> SessionManager::CreateSession(MigrationSession
                                                                 const std::string &destUri,
                                                                 const std::string &localUri,
                                                                 const unsigned int flags,
-                                                                NodeAdmission admission)
+                                                                NodeAdmission admission, std::string attemptId)
 {
     std::lock_guard<std::mutex> lock(mtx_);
 
@@ -47,7 +48,7 @@ std::shared_ptr<MigrationSession> SessionManager::CreateSession(MigrationSession
 
     // 先把令牌交给对象，再发布到 manager；其他 RPC 不会看到尚未持锁的响应方会话。
     auto session = std::make_shared<MigrationSession>(role, uuid, domainName, destUri, localUri, flags,
-                                                      std::move(admission));
+                                                      std::move(admission), std::move(attemptId));
     sessions_[uuid] = session;
     return session;
 }
@@ -60,6 +61,18 @@ std::shared_ptr<MigrationSession> SessionManager::GetSession(const std::string &
         return nullptr;
     }
     return it->second;
+}
+
+bool SessionManager::HasAttempt(const std::string &attemptId)
+{
+    // 缓存淘汰时只读取已发布会话；这里不反向访问缓存，保持锁获取顺序单向。
+    std::lock_guard<std::mutex> lock(mtx_);
+    for (const auto &entry : sessions_) {
+        if (entry.second->AttemptId() == attemptId) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void SessionManager::RemoveSession(const std::string &uuid)
@@ -79,10 +92,12 @@ void SessionManager::RemoveSessionIfCurrent(const std::string &uuid, const Migra
 
 MigrationSession::MigrationSession(Role role, const std::string &uuid, const std::string &domainName,
                                    const std::string &destUri, const std::string &localUri, const unsigned int flags,
-                                   NodeAdmission admission)
+                                   NodeAdmission admission, std::string attemptId)
+    // 源端创建一次会话只生成一次身份；目的端必须沿用 Prepare 请求传来的身份。
     : role_(role),
       state_(State::Init),
       uuid_(uuid),
+      attemptId_(role == Role::Initiator && attemptId.empty() ? GenerateMigrationAttemptId() : std::move(attemptId)),
       domainName_(domainName),
       destUri_(destUri),
       localUri_(localUri),
@@ -188,7 +203,9 @@ MigrateSessionRc MigrationSession::SendMigrateRequest()
     }
 
     protos::PrepareMigRequest req;
+    // 后续阶段都复用会话身份，不能按 RPC 重新生成，否则目的端会视为其他尝试。
     req.set_uuid(uuid_);
+    req.set_attempt_id(attemptId_);
     req.set_domainname(domainName_);
 
     protos::PrepareMigReply reply;
@@ -311,6 +328,7 @@ MigrateSessionRc MigrationSession::SendStartMigration()
     protos::StartMigRequest req;
     req.set_domainname(domainName_);
     req.set_uuid(uuid_);
+    req.set_attempt_id(attemptId_);
 
     protos::StartMigReply res;
     int32_t ret = rpcClient_->StartMigration(RPC_SIGNAL_TIMEOUT, req, &res);
@@ -400,6 +418,7 @@ MigrateSessionRc MigrationSession::SendTransferOnce(const std::string &cipher, c
     // 2.传输数据
     protos::VRsourceInfoRequest req;
     req.set_uuid(uuid_);
+    req.set_attempt_id(attemptId_);
     req.set_cipherdata(cipher);
     auto protosDesc = req.mutable_vtpcminfo();
     DescriptionToProto(vmInfo, protosDesc);
@@ -486,6 +505,7 @@ MigrateSessionRc MigrationSession::SendFinishedNotify(bool success)
     protos::MigrateResultRequest req;
     req.set_result(success ? 0 : 1);
     req.set_uuid(uuid_);
+    req.set_attempt_id(attemptId_);
     protos::MigrateResultReply res;
     auto ret = rpcClient_->NotifyVRMigrateResult(RPC_SIGNAL_TIMEOUT, req, &res);
     if (ret != 0) {
@@ -572,6 +592,7 @@ MigrateSessionRc MigrationSession::GetExchangePkAndReport(protos::EXchangePkAndR
         }
         req->set_domainname(domainName_);
         req->set_uuid(uuid);
+        req->set_attempt_id(attemptId_);
         req->set_cert(certStr);
         req->set_publickey(pubKeyStr);
         auto hostReportProto = req->mutable_hostreport();

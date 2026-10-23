@@ -37,7 +37,7 @@ public:
 
     MigrationSession(Role role, const std::string &uuid, const std::string &domainName,
                      const std::string &destUri = "", const std::string &localUri = "", const unsigned int flags = 0,
-                     NodeAdmission admission = {});
+                     NodeAdmission admission = {}, std::string attemptId = {});
 
     // 主动方起步
     MigrateSessionRc Start();
@@ -57,6 +57,11 @@ public:
     const std::string &Id() const
     {
         return uuid_;
+    }
+
+    const std::string &AttemptId() const noexcept
+    {
+        return attemptId_;
     }
 
     // 仅 Initiator 使用：注入 RPC 客户端（会话拥有其生命周期）
@@ -189,6 +194,8 @@ private:
     Role role_;
     State state_;
     std::string uuid_;
+    // 源端一次命令生成，目的端从 Prepare 保存；后续五个阶段据此防止旧请求串入新会话。
+    std::string attemptId_;
     std::string domainName_;
     std::string destUri_;
     std::string localUri_;
@@ -228,10 +235,13 @@ public:
     std::shared_ptr<MigrationSession> CreateSession(MigrationSession::Role role, const std::string &uuid,
                                                     const std::string &domainName, const std::string &destUri,
                                                     const std::string &localUri, const unsigned int flags,
-                                                    NodeAdmission admission = {});
+                                                    NodeAdmission admission = {}, std::string attemptId = {});
 
     // 查找会话（比如 gRPC handler 用这个）
     std::shared_ptr<MigrationSession> GetSession(const std::string &uuid);
+
+    // 供回放缓存判定会话是否仍活跃；锁内只做只读扫描，不触发缓存反向调用。
+    bool HasAttempt(const std::string &attemptId);
 
     // 会话结束时移除 manager 持有的引用；对象在最后一个使用者释放后销毁
     void RemoveSession(const std::string &uuid);
