@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package virtrust.protos;
 
-// The greeting service definition.
+// 迁移服务：前五个 RPC 在节点之间传递阶段消息，最后一个供本机 CLI/API 发起源端任务。
 service MigrationService {
   // 1: 准备迁移
   rpc PrepareMigration (PrepareMigRequest) returns (PrepareMigReply) {}
@@ -35,7 +35,9 @@ message DomainMigraterRequest {
 }
 
 message DomainMigraterReply {
+    // 数值业务码供既有控制流判断；诊断描述阶段、确认步骤和补偿失败。
     uint32 result = 1;
+    MigrationDiagnostic diagnostic = 2;
 }
 
 message PrepareMigRequest {
@@ -48,6 +50,7 @@ message PrepareMigRequest {
 
 message PrepareMigReply {
      uint32 result = 1;
+     MigrationDiagnostic diagnostic = 2;
 }
 
 message EXchangePkAndReportRequest {
@@ -68,6 +71,7 @@ message EXchangePkAndReportReply{
     TrustReportNew hostReport = 6; // struct
     TrustReportNew vmReport = 7; // struct
     bytes tcm2Key = 8;
+     MigrationDiagnostic diagnostic = 9;
 }
 
 message StartMigRequest {
@@ -77,6 +81,7 @@ message StartMigRequest {
 
 message StartMigReply {
      uint32 result = 1;
+     MigrationDiagnostic diagnostic = 2;
 }
 
 message VRsourceInfoRequest{
@@ -87,6 +92,7 @@ message VRsourceInfoRequest{
 
 message  VRsourceInfoReply{
   uint32 result = 1;
+  MigrationDiagnostic diagnostic = 2;
 }
 
 message MigrateResultRequest {
@@ -97,6 +103,86 @@ message MigrateResultRequest {
 
 message MigrateResultReply {
   uint32 result = 1;
+  MigrationDiagnostic diagnostic = 2;
+}
+
+// 迁移诊断只携带结构化状态及原始码，不传输密钥、证书或密文。
+enum MigrationOutcomeCode {
+  MIGRATION_OUTCOME_UNKNOWN = 0;
+  MIGRATION_OUTCOME_SUCCESS = 1;
+  MIGRATION_OUTCOME_FAILED_BEFORE_EFFECT = 2;
+  MIGRATION_OUTCOME_PARTIAL = 3;
+}
+
+enum MigrationStageCode {
+  MIGRATION_STAGE_NONE = 0;
+  MIGRATION_STAGE_PREFLIGHT = 1;
+  MIGRATION_STAGE_PREPARE = 2;
+  MIGRATION_STAGE_KEY_EXCHANGE = 3;
+  MIGRATION_STAGE_START = 4;
+  MIGRATION_STAGE_LIBVIRT_TRANSFER = 5;
+  MIGRATION_STAGE_DATA_TRANSFER = 6;
+  MIGRATION_STAGE_SOURCE_COMMIT = 7;
+  MIGRATION_STAGE_DESTINATION_COMMIT = 8;
+  MIGRATION_STAGE_SOURCE_CLEANUP = 9;
+  MIGRATION_STAGE_UDS = 10;
+}
+
+enum MigrationSideCode {
+  MIGRATION_SIDE_UNKNOWN = 0;
+  MIGRATION_SIDE_SOURCE = 1;
+  MIGRATION_SIDE_DESTINATION = 2;
+}
+
+enum MigrationOperationCode {
+  MIGRATION_OPERATION_NONE = 0;
+  MIGRATION_OPERATION_VALIDATE = 1;
+  MIGRATION_OPERATION_ACQUIRE_ADMISSION = 2;
+  MIGRATION_OPERATION_CONNECT_LIBVIRT = 3;
+  MIGRATION_OPERATION_LOOKUP_DOMAIN = 4;
+  MIGRATION_OPERATION_CHECK_IDENTITY = 5;
+  MIGRATION_OPERATION_VERIFY_CERTIFICATE = 6;
+  MIGRATION_OPERATION_VERIFY_REPORT = 7;
+  MIGRATION_OPERATION_EXCHANGE_KEY = 8;
+  MIGRATION_OPERATION_GET_CIPHER = 9;
+  MIGRATION_OPERATION_IMPORT_CIPHER = 10;
+  MIGRATION_OPERATION_CREATE_VROOT = 11;
+  MIGRATION_OPERATION_MIGRATE_LIBVIRT = 12;
+  MIGRATION_OPERATION_NOTIFY_TSB = 13;
+  MIGRATION_OPERATION_NOTIFY_PEER = 14;
+  MIGRATION_OPERATION_REMOVE_VROOT = 15;
+  MIGRATION_OPERATION_UNDEFINE_DOMAIN = 16;
+  MIGRATION_OPERATION_GET_CERTIFICATE = 17;
+  MIGRATION_OPERATION_GET_REPORT = 18;
+  MIGRATION_OPERATION_EXPORT_KEY = 19;
+  MIGRATION_OPERATION_GET_DESCRIPTION = 20;
+}
+
+enum MigrationErrorOriginCode {
+  MIGRATION_ERROR_ORIGIN_UNKNOWN = 0;
+  MIGRATION_ERROR_ORIGIN_VALIDATION = 1;
+  MIGRATION_ERROR_ORIGIN_TSB = 2;
+  MIGRATION_ERROR_ORIGIN_LIBVIRT = 3;
+  MIGRATION_ERROR_ORIGIN_GRPC = 4;
+  MIGRATION_ERROR_ORIGIN_INTERNAL = 5;
+}
+
+message MigrationErrorInfo {
+  MigrationStageCode stage = 1;
+  MigrationSideCode side = 2;
+  MigrationOperationCode operation = 3;
+  MigrationErrorOriginCode origin = 4;
+  bool has_raw_code = 5;
+  int32 raw_code = 6;
+}
+
+message MigrationDiagnostic {
+  // 仅记录已获得的证据；未知或部分完成时调用方必须提示人工核查。
+  MigrationOutcomeCode outcome = 1;
+  MigrationErrorInfo primary_error = 2;
+  uint32 confirmed_steps = 3;
+  repeated MigrationErrorInfo compensation_errors = 4;
+  bool manual_check_required = 5;
 }
 
 // Trust report structures for migration
