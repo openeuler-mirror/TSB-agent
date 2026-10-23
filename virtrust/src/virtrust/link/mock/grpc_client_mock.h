@@ -10,6 +10,7 @@
 #include <string>
 
 #include "virtrust/link/defines.h"
+#include "virtrust/link/migration_result.h"
 #include "virtrust/link/proto/migrate.grpc.pb.h"
 
 #include <securec.h>
@@ -31,7 +32,7 @@ public:
     explicit UdsClientMock(LinkConfig config) : config_(config) {}
 
     // Mock DomainMigrate function - migration entry point
-    int32_t DomainMigrate(const MigrationConfig &config);
+    MigrationResult DomainMigrate(const MigrationConfig &config);
 
 private:
     LinkConfig config_;

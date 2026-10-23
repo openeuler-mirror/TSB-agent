@@ -35,7 +35,13 @@ OpRc OpMigrate::Exec()
         VIRTRUST_LOG_ERROR("Failed to establish connection to: {}", config_.uri);
         return OpRc::ERROR;
     }
-    return ParseVirtrustRc(DomainMigrate(conn_, domainName_, destUri_, flags_));
+    // API 返回业务最终状态及错误证据；命令行不再从日志反推迁移是否完成。
+    const auto result = DomainMigrate(conn_, domainName_, destUri_, flags_);
+    // Busy 继续由主命令统一提示“未开始”；其他迁移失败只输出结构化的固定字段。
+    if (result.rc != VirtrustRc::OK && result.rc != VirtrustRc::BUSY) {
+        fmt::print(stderr, "{}\n", FormatMigrationResult(result));
+    }
+    return ParseVirtrustRc(result.rc);
 }
 
 // Parse the args from command line

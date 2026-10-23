@@ -11,6 +11,7 @@
 #include "virtrust-sh/operator/op_migrate.h"
 #include "virtrust/base/logger.h"
 #include "virtrust/dllib/libvirt.h"
+#include "virtrust/link/migration_result.h"
 
 namespace virtrust {
 namespace {
@@ -41,7 +42,82 @@ class ScopedMigrationLoggerReset {
 public:
     ~ScopedMigrationLoggerReset() { Logger::Instance()->Reset(); }
 };
+
+bool &InjectMigrationResult()
+{
+    static bool enabled = false;
+    return enabled;
+}
+
+bool &InjectUnknownMigrationResult()
+{
+    static bool enabled = false;
+    return enabled;
+}
+
+int &MigrationCallCount()
+{
+    static int count = 0;
+    return count;
+}
+
+struct ScopedMigrationResultInjection {
+    explicit ScopedMigrationResultInjection(bool unknown = false)
+    {
+        InjectMigrationResult() = true;
+        InjectUnknownMigrationResult() = unknown;
+        MigrationCallCount() = 0;
+    }
+    ~ScopedMigrationResultInjection()
+    {
+        InjectMigrationResult() = false;
+        InjectUnknownMigrationResult() = false;
+    }
+};
 } // 匿名命名空间
+
+TEST(OpMigrateTest, PartialFailureShowsStageAndManualCheckWithoutRetry)
+{
+    ScopedMigrationResultInjection injection;
+    OpMigrate operation;
+    OpConfig config;
+    config.uri = "qemu:///system";
+    operation.SetConfig(config);
+    const char *args[] = {"migrate", "test-domain-2", "qemu+tls://192.168.1.100/system"};
+    ASSERT_EQ(operation.ParseArgv(3, const_cast<char **>(args)), OpRc::OK);
+
+    testing::internal::CaptureStderr();
+    const auto rc = operation.Exec();
+    const std::string output = testing::internal::GetCapturedStderr();
+    EXPECT_EQ(rc, OpRc::ERROR);
+    EXPECT_EQ(MigrationCallCount(), 1);
+    EXPECT_NE(output.find("PARTIAL"), std::string::npos);
+    EXPECT_NE(output.find("SOURCE_CLEANUP"), std::string::npos);
+    EXPECT_NE(output.find("raw_code=7"), std::string::npos);
+    EXPECT_NE(output.find("Manual verification required"), std::string::npos);
+    EXPECT_EQ(output.find("cipher"), std::string::npos);
+}
+
+TEST(OpMigrateTest, UnknownFailureShowsManualCheckWithoutInventingRawCode)
+{
+    ScopedMigrationResultInjection injection(true);
+    OpMigrate operation;
+    OpConfig config;
+    config.uri = "qemu:///system";
+    operation.SetConfig(config);
+    const char *args[] = {"migrate", "test-domain-2", "qemu+tls://192.168.1.100/system"};
+    ASSERT_EQ(operation.ParseArgv(3, const_cast<char **>(args)), OpRc::OK);
+
+    testing::internal::CaptureStderr();
+    const auto rc = operation.Exec();
+    const std::string output = testing::internal::GetCapturedStderr();
+    EXPECT_EQ(rc, OpRc::ERROR);
+    EXPECT_EQ(MigrationCallCount(), 1);
+    EXPECT_NE(output.find("UNKNOWN"), std::string::npos);
+    EXPECT_NE(output.find("stage=UDS"), std::string::npos);
+    EXPECT_NE(output.find("Manual verification required"), std::string::npos);
+    EXPECT_EQ(output.find("raw_code="), std::string::npos);
+}
 
 TEST(OpMigrateTest, RejectsRemoteSourceBeforeConnecting)
 {
@@ -205,3 +281,33 @@ TEST(OpMigrateTest, ParseArgvFlagCombinationTest)
     EXPECT_EQ(result, OpRc::OK);
 }
 } // namespace virtrust
+
+extern "C" virtrust::MigrationResult RealCliDomainMigrate(const std::unique_ptr<virtrust::ConnCtx> &,
+    const std::string &, const std::string &, unsigned int)
+    asm("__real__ZN8virtrust13DomainMigrateERKSt10unique_ptrINS_7ConnCtxESt14default_deleteIS1_EERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEESE_j");
+extern "C" virtrust::MigrationResult WrappedCliDomainMigrate(const std::unique_ptr<virtrust::ConnCtx> &,
+    const std::string &, const std::string &, unsigned int)
+    asm("__wrap__ZN8virtrust13DomainMigrateERKSt10unique_ptrINS_7ConnCtxESt14default_deleteIS1_EERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEESE_j");
+extern "C" virtrust::MigrationResult WrappedCliDomainMigrate(const std::unique_ptr<virtrust::ConnCtx> &connection,
+    const std::string &name, const std::string &destination, unsigned int flags)
+{
+    if (!virtrust::InjectMigrationResult()) {
+        return RealCliDomainMigrate(connection, name, destination, flags);
+    }
+    ++virtrust::MigrationCallCount();
+    virtrust::MigrationResult result;
+    if (virtrust::InjectUnknownMigrationResult()) {
+        result.primaryError = {virtrust::MigrationStage::Uds, virtrust::MigrationSide::Source,
+                               virtrust::MigrationOperation::NotifyPeer, virtrust::MigrationErrorOrigin::Grpc,
+                               false, 0};
+        result.hasPrimaryError = true;
+        return result;
+    }
+    result.outcome = virtrust::MigrationOutcome::Partial;
+    result.primaryError = {virtrust::MigrationStage::SourceCleanup, virtrust::MigrationSide::Source,
+                           virtrust::MigrationOperation::RemoveVRoot, virtrust::MigrationErrorOrigin::Tsb,
+                           true, 7};
+    result.hasPrimaryError = true;
+    result.manualCheckRequired = true;
+    return result;
+}

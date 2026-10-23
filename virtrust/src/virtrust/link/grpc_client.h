@@ -7,6 +7,7 @@
 #include <string>
 
 #include "virtrust/link/defines.h"
+#include "virtrust/link/migration_result.h"
 
 #include "virtrust/link/proto/migrate.grpc.pb.h"
 
@@ -21,18 +22,18 @@ namespace virtrust {
 using UdsClient = UdsClientMock;
 using RpcClient = RpcClientMock;
 #else
-// 给virsh-sh命令行使用
+// CLI 和公开 API 访问本机守护进程；不直接连接目的节点。
 class UdsClient {
 public:
     explicit UdsClient(LinkConfig config);
 
-    int32_t DomainMigrate(const MigrationConfig &config);
+    MigrationResult DomainMigrate(const MigrationConfig &config);
 
 private:
     LinkConfig config_;
 };
 
-// 守护进程之间使用
+// 源端守护进程访问目的端守护进程；调用者必须区分传输失败和业务回复。
 class RpcClient {
 public:
     explicit RpcClient(LinkConfig config);

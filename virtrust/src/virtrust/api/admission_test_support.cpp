@@ -235,15 +235,39 @@ extern "C" virtrust::LockOutcome WrappedAdmission(virtrust::NodeAdmission *self,
 }
 
 extern "C" int __real_open(const char *, int, ...);
-extern "C" int32_t RealMigrationRpc(virtrust::UdsClientMock *, const virtrust::MigrationConfig &)
+extern "C" virtrust::MigrationResult RealMigrationRpc(virtrust::UdsClientMock *, const virtrust::MigrationConfig &)
     asm("__real__ZN8virtrust13UdsClientMock13DomainMigrateERKNS_15MigrationConfigE");
-extern "C" int32_t WrappedMigrationRpc(virtrust::UdsClientMock *, const virtrust::MigrationConfig &)
+extern "C" virtrust::MigrationResult WrappedMigrationRpc(virtrust::UdsClientMock *, const virtrust::MigrationConfig &)
     asm("__wrap__ZN8virtrust13UdsClientMock13DomainMigrateERKNS_15MigrationConfigE");
-extern "C" int32_t WrappedMigrationRpc(virtrust::UdsClientMock *client, const virtrust::MigrationConfig &config)
+extern "C" virtrust::MigrationResult WrappedMigrationRpc(virtrust::UdsClientMock *client,
+    const virtrust::MigrationConfig &config)
 {
     auto &state = virtrust::test::AdmissionState();
     ++state.udsCalls;
-    return state.udsResultOverride == -999 ? RealMigrationRpc(client, config) : state.udsResultOverride;
+    if (state.udsResultOverride == -999) {
+        return RealMigrationRpc(client, config);
+    }
+    virtrust::MigrationResult result;
+    if (state.udsResultOverride == static_cast<int>(virtrust::VirtrustRc::OK)) {
+        result.rc = virtrust::VirtrustRc::OK;
+        result.outcome = virtrust::MigrationOutcome::Success;
+        result.manualCheckRequired = false;
+    } else if (state.udsResultOverride == static_cast<int>(virtrust::VirtrustRc::BUSY)) {
+        result.rc = virtrust::VirtrustRc::BUSY;
+        result.outcome = virtrust::MigrationOutcome::FailedBeforeEffect;
+        result.primaryError = {virtrust::MigrationStage::Preflight, virtrust::MigrationSide::Source,
+                               virtrust::MigrationOperation::AcquireAdmission,
+                               virtrust::MigrationErrorOrigin::Validation, false, 0};
+        result.hasPrimaryError = true;
+        result.manualCheckRequired = false;
+    } else {
+        result.primaryError = {virtrust::MigrationStage::Uds, virtrust::MigrationSide::Source,
+                               virtrust::MigrationOperation::NotifyPeer,
+                               state.udsResultOverride == -1 ? virtrust::MigrationErrorOrigin::Grpc
+                                                             : virtrust::MigrationErrorOrigin::Internal, false, 0};
+        result.hasPrimaryError = true;
+    }
+    return result;
 }
 
 extern "C" int __wrap_open(const char *path, int flags, ...)

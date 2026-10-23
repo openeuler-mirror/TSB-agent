@@ -59,10 +59,10 @@ TEST_F(GrpcClientTest, UdsClientDomainMigrateRequest)
 {
     UdsClient client(linkConfig_);
 
-    int32_t result = client.DomainMigrate(migrationConfig_);
+    const auto result = client.DomainMigrate(migrationConfig_);
 
     // Should return 0 when mock server and vm is valid
-    EXPECT_EQ(result, 0);
+    EXPECT_EQ(result.rc, VirtrustRc::OK);
 }
 
 TEST_F(GrpcClientTest, UdsClientDomainMigrateWithEmptyConfig)
@@ -70,10 +70,10 @@ TEST_F(GrpcClientTest, UdsClientDomainMigrateWithEmptyConfig)
     UdsClient client(linkConfig_);
 
     MigrationConfig emptyConfig;
-    int32_t result = client.DomainMigrate(emptyConfig);
+    const auto result = client.DomainMigrate(emptyConfig);
 
     // Should return error 1 when server emptyConfig
-    EXPECT_EQ(result, 1);
+    EXPECT_EQ(result.rc, VirtrustRc::ERROR);
 }
 
 TEST_F(GrpcClientTest, RpcClientConstructor)
@@ -112,6 +112,22 @@ TEST_F(GrpcClientTest, RpcClientPrepareMigration)
 
     // Should return 0 when mock server
     EXPECT_EQ(result, 0);
+}
+
+TEST_F(GrpcClientTest, MockPrepareSuccessDoesNotCarryHiddenFailureDiagnostic)
+{
+    RpcClient client(linkConfig_);
+    protos::PrepareMigRequest request;
+    request.set_uuid("test-uuid");
+    request.set_domainname("test-domain");
+    protos::PrepareMigReply first;
+    protos::PrepareMigReply second;
+
+    ASSERT_EQ(client.PrepareMigration(5, request, &first), 0);
+    ASSERT_EQ(client.PrepareMigration(5, request, &second), 0);
+    // 模拟远端成功时不能先执行本地真实服务、再覆盖其失败 result。
+    EXPECT_FALSE(first.has_diagnostic());
+    EXPECT_FALSE(second.has_diagnostic());
 }
 
 TEST_F(GrpcClientTest, RpcClientExchangePkAndReport)
@@ -277,10 +293,10 @@ TEST_F(GrpcClientTest, UdsClientWithInvalidUdsPath)
     UdsClient client(invalidConfig);
 
     // Should handle empty UDS path gracefully
-    int32_t result = client.DomainMigrate(migrationConfig_);
+    const auto result = client.DomainMigrate(migrationConfig_);
 
     // Should return 0 when mock server and vm is valid
-    EXPECT_EQ(result, 0);
+    EXPECT_EQ(result.rc, VirtrustRc::OK);
 }
 
 } // namespace virtrust

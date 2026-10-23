@@ -8,15 +8,10 @@
 
 
 #include "virtrust/link/migration_session.h"
-#include "virtrust/link/migration_service_impl.h"
 
 namespace virtrust {
 
-namespace {
-constexpr std::string_view MOCK_DEST_UUID = "12345678-1234-1234-1234-123456789010";
-}
-
-int32_t UdsClientMock::DomainMigrate(const MigrationConfig &config)
+MigrationResult UdsClientMock::DomainMigrate(const MigrationConfig &config)
 {
     // Create source migration session
     auto &mgr = SessionManager::GetInstance();
@@ -29,15 +24,17 @@ int32_t UdsClientMock::DomainMigrate(const MigrationConfig &config)
         config.flags
     );
     if (!session) {
-        return 1; // Failed to create session
+        return MigrationResult{};
     }
     session->SetRpcClient(std::make_unique<RpcClientMock>(config_));
 
     // Start the migration session - this will cover migration_session.cpp
     auto ret = session->Start();
+    auto diagnostic = session->Diagnostic();
     session->Cleanup();
     // destSession->Cleanup();
-    return (ret == MigrateSessionRc::OK) ? 0 : 1;
+    diagnostic.rc = ret == MigrateSessionRc::OK ? VirtrustRc::OK : diagnostic.rc;
+    return diagnostic;
 }
 
 int32_t RpcClientMock::PrepareMigration(uint32_t timeout, const protos::PrepareMigRequest &request,
@@ -45,21 +42,13 @@ int32_t RpcClientMock::PrepareMigration(uint32_t timeout, const protos::PrepareM
 {
     (void)timeout;
     (void)request;
-
-    // Always succeed for stable unit testing - removed random failure logic
-
-    MigrationServiceImpl serviceImpl;
-    grpc::ServerContext context;
-    protos::PrepareMigRequest mockRequest = request;
-    mockRequest.set_uuid(std::string(MOCK_DEST_UUID));
-    serviceImpl.PrepareMigration(&context, &mockRequest, response);
-
-    // Mock successful preparation
-    if (response != nullptr) {
-        response->set_result(0); // Success
+    if (response == nullptr) {
+        return RPC_TRANSPORT_FAILURE;
     }
-
-    return 0; // Success
+    // 此对象只模拟远端成功回复；目的端真实业务由服务层测试直接覆盖。
+    response->Clear();
+    response->set_result(0);
+    return 0;
 }
 
 int32_t RpcClientMock::ExchangePkAndReport(uint32_t timeout, const protos::EXchangePkAndReportRequest &request,
@@ -68,19 +57,10 @@ int32_t RpcClientMock::ExchangePkAndReport(uint32_t timeout, const protos::EXcha
     (void)timeout;
 
     if (response == nullptr) {
-        return -1; // Error
+        return RPC_TRANSPORT_FAILURE;
     }
-
-    // Always succeed for stable unit testing - removed random failure logic
-
-    MigrationServiceImpl serviceImpl;
-    grpc::ServerContext context;
-    protos::EXchangePkAndReportRequest mockRequest = request;
-    mockRequest.set_uuid(std::string(MOCK_DEST_UUID));
-    serviceImpl.ExchangePkAndReport(&context, &mockRequest, response);
-
-    // Mock response with generated data
-    response->set_result(0); // Success
+    response->Clear();
+    response->set_result(0);
     response->set_domainname(request.domainname());
     response->set_uuid(request.uuid());
 
@@ -99,70 +79,46 @@ int32_t RpcClientMock::ExchangePkAndReport(uint32_t timeout, const protos::EXcha
     std::string mockTcm2Key = GenerateMockTcm2Key();
     response->set_tcm2key(mockTcm2Key);
 
-    return 0; // Success
+    return 0;
 }
 
 int32_t RpcClientMock::StartMigration(uint32_t timeout, const protos::StartMigRequest &request,
                                       protos::StartMigReply *response)
 {
-    (void)timeout; (void)request;
-
-    // Always succeed for stable unit testing - removed random failure logic
-
-    MigrationServiceImpl serviceImpl;
-    grpc::ServerContext context;
-    protos::StartMigRequest mockRequest = request;
-    mockRequest.set_uuid(std::string(MOCK_DEST_UUID));
-    serviceImpl.StartMigration(&context, &mockRequest, response);
-
-    // Mock successful start
-    if (response != nullptr) {
-        response->set_result(0); // Success
+    (void)timeout;
+    (void)request;
+    if (response == nullptr) {
+        return RPC_TRANSPORT_FAILURE;
     }
-
-    return 0; // Success
+    response->Clear();
+    response->set_result(0);
+    return 0;
 }
 
 int32_t RpcClientMock::SendVRsourceData(uint32_t timeout, const protos::VRsourceInfoRequest &request,
                                         protos::VRsourceInfoReply *response)
 {
-    (void)timeout; (void)request;
-
-    // Always succeed for stable unit testing - removed random failure logic
-
-    MigrationServiceImpl serviceImpl;
-    grpc::ServerContext context;
-    protos::VRsourceInfoRequest mockRequest = request;
-    mockRequest.set_uuid(std::string(MOCK_DEST_UUID));
-    serviceImpl.SendVRsourceData(&context, &mockRequest, response);
-
-    // Mock successful data transfer
-    if (response != nullptr) {
-        response->set_result(0); // Success
+    (void)timeout;
+    (void)request;
+    if (response == nullptr) {
+        return RPC_TRANSPORT_FAILURE;
     }
-
-    return 0; // Success
+    response->Clear();
+    response->set_result(0);
+    return 0;
 }
 
 int32_t RpcClientMock::NotifyVRMigrateResult(uint32_t timeout, const protos::MigrateResultRequest &request,
                                              protos::MigrateResultReply *response)
 {
-    (void)timeout; (void)request;
-
-    // Always succeed for stable unit testing - removed random failure logic
-
-    MigrationServiceImpl serviceImpl;
-    grpc::ServerContext context;
-    protos::MigrateResultRequest mockRequest = request;
-    mockRequest.set_uuid(std::string(MOCK_DEST_UUID));
-    serviceImpl.NotifyVRMigrateResult(&context, &mockRequest, response);
-
-    // Mock successful result notification
-    if (response != nullptr) {
-        response->set_result(0); // Success
+    (void)timeout;
+    (void)request;
+    if (response == nullptr) {
+        return RPC_TRANSPORT_FAILURE;
     }
-
-    return 0; // Success
+    response->Clear();
+    response->set_result(0);
+    return 0;
 }
 
 protos::TrustReportNew RpcClientMock::GenerateMockTrustReport()

@@ -9,9 +9,11 @@
 #include <vector>
 
 #include "virtrust/api/context.h"
+#include "virtrust/api/admission_test_support.h"
 #include "virtrust/api/defines.h"
 #include "virtrust/api/domain.h"
 #include "virtrust/dllib/libvirt.h"
+#include "virtrust/link/migration_result.h"
 
 namespace virtrust {
 
@@ -126,24 +128,56 @@ TEST(DomainTest, DomainMigrate)
     auto &conn = GetGlobalConn();
 
     // Test with empty domain name
-    VirtrustRc rc = DomainMigrate(conn, "", "qemu+tls://dest:16509/system", MIGRATE_UNDEFINE_SOURCE);
-    EXPECT_EQ(VirtrustRc::ERROR, rc);
+    MigrationResult result = DomainMigrate(conn, "", "qemu+tls://dest:16509/system", MIGRATE_UNDEFINE_SOURCE);
+    EXPECT_EQ(VirtrustRc::ERROR, result.rc);
 
     // Test with empty destination URI
-    rc = DomainMigrate(conn, "test-domain", "", MIGRATE_UNDEFINE_SOURCE);
-    EXPECT_EQ(VirtrustRc::ERROR, rc);
+    result = DomainMigrate(conn, "test-domain", "", MIGRATE_UNDEFINE_SOURCE);
+    EXPECT_EQ(VirtrustRc::ERROR, result.rc);
 
     // Test with invalid flag
-    rc = DomainMigrate(conn, "test-domain-1", "qemu+tls://dest:16509/system", 0);
-    EXPECT_EQ(VirtrustRc::ERROR, rc); 
+    result = DomainMigrate(conn, "test-domain-1", "qemu+tls://dest:16509/system", 0);
+    EXPECT_EQ(VirtrustRc::ERROR, result.rc);
 
     // Test with running domain (should fail to migrate)
-    rc = DomainMigrate(conn, "running-domain", "qemu+tls://dest:16509/system", MIGRATE_UNDEFINE_SOURCE);
-    EXPECT_EQ(VirtrustRc::ERROR, rc);     
+    result = DomainMigrate(conn, "running-domain", "qemu+tls://dest:16509/system", MIGRATE_UNDEFINE_SOURCE);
+    EXPECT_EQ(VirtrustRc::ERROR, result.rc);
     
     // Test with valid domain name and valid flag
-    rc = DomainMigrate(conn, "test-domain-2", "qemu+tls://dest:16509/system", MIGRATE_UNDEFINE_SOURCE);
-    EXPECT_EQ(VirtrustRc::OK, rc);
+    result = DomainMigrate(conn, "test-domain-2", "qemu+tls://192.168.1.100:16509/system",
+                           MIGRATE_UNDEFINE_SOURCE);
+    EXPECT_EQ(VirtrustRc::OK, result.rc);
+}
+
+TEST(DomainTest, MigrationApiNullConnectionHasNoSideEffectDiagnostic)
+{
+    const MigrationResult result = DomainMigrate(nullptr, "test-domain-2",
+                                                  "qemu+tls://dest:16509/system", MIGRATE_UNDEFINE_SOURCE);
+    EXPECT_EQ(result.rc, VirtrustRc::ERROR);
+    EXPECT_EQ(result.outcome, MigrationOutcome::FailedBeforeEffect);
+    ASSERT_TRUE(result.hasPrimaryError);
+    EXPECT_EQ(result.primaryError.stage, MigrationStage::Preflight);
+    EXPECT_EQ(result.primaryError.side, MigrationSide::Source);
+    EXPECT_EQ(result.primaryError.operation, MigrationOperation::Validate);
+    EXPECT_FALSE(result.manualCheckRequired);
+}
+
+TEST(DomainTest, MigrationApiRejectsDestinationHostnameBeforeUds)
+{
+    const auto &conn = GetGlobalConn();
+    ASSERT_NE(conn, nullptr);
+    auto &state = test::AdmissionState();
+    state.udsCalls = 0;
+    state.udsResultOverride = 0;
+    const MigrationResult result = DomainMigrate(conn, "test-domain-2",
+        "qemu+tls://remote.example.com/system?hint=192.168.1.100", MIGRATE_UNDEFINE_SOURCE);
+    state.udsResultOverride = -999;
+    EXPECT_EQ(result.rc, VirtrustRc::ERROR);
+    EXPECT_EQ(result.outcome, MigrationOutcome::FailedBeforeEffect);
+    ASSERT_TRUE(result.hasPrimaryError);
+    EXPECT_EQ(result.primaryError.stage, MigrationStage::Preflight);
+    EXPECT_EQ(result.primaryError.operation, MigrationOperation::Validate);
+    EXPECT_EQ(state.udsCalls, 0);
 }
 
 // DomainStart Test Cases

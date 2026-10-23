@@ -157,7 +157,7 @@ TEST(DomainMigrationAdmissionTest, SendsValidMigrationWithoutOpeningLegacyLock)
     state.legacyOpens = state.udsCalls = 0;
     state.failLegacyOpen = true;
     state.udsResultOverride = 0;
-    EXPECT_EQ(DomainMigrate(conn, "test-domain-2", "qemu+tls://192.168.1.100/system", MIGRATE_UNDEFINE_SOURCE),
+    EXPECT_EQ(DomainMigrate(conn, "test-domain-2", "qemu+tls://192.168.1.100/system", MIGRATE_UNDEFINE_SOURCE).rc,
               VirtrustRc::OK);
     EXPECT_EQ(state.legacyOpens, 0);
     EXPECT_EQ(state.udsCalls, 1);
@@ -173,7 +173,7 @@ TEST(DomainMigrationAdmissionTest, RejectsRemoteSourceBeforeBusinessQueryOrUds)
     auto &state = test::AdmissionState();
     state.businessCalls = state.legacyOpens = state.udsCalls = 0;
     state.udsResultOverride = 0;
-    EXPECT_EQ(DomainMigrate(conn, "test-domain-2", "qemu+tls://192.168.1.100/system", MIGRATE_UNDEFINE_SOURCE),
+    EXPECT_EQ(DomainMigrate(conn, "test-domain-2", "qemu+tls://192.168.1.100/system", MIGRATE_UNDEFINE_SOURCE).rc,
               VirtrustRc::ERROR);
     EXPECT_EQ(state.businessCalls, 0);
     EXPECT_EQ(state.legacyOpens, 0);
@@ -202,8 +202,13 @@ TEST(DomainMigrationAdmissionTest, MapsDaemonBusyButOtherFailuresRemainErrors)
              {1, VirtrustRc::ERROR},
              {-1, VirtrustRc::ERROR}}) {
         state.udsResultOverride = reply;
-        EXPECT_EQ(DomainMigrate(conn, "test-domain-2", "qemu+tls://192.168.1.100/system", MIGRATE_UNDEFINE_SOURCE),
-                  expected);
+        const auto result = DomainMigrate(conn, "test-domain-2", "qemu+tls://192.168.1.100/system",
+                                          MIGRATE_UNDEFINE_SOURCE);
+        EXPECT_EQ(result.rc, expected);
+        if (expected == VirtrustRc::BUSY) {
+            EXPECT_EQ(result.outcome, MigrationOutcome::FailedBeforeEffect);
+            EXPECT_FALSE(result.manualCheckRequired);
+        }
     }
     EXPECT_EQ(state.legacyOpens, 0);
     EXPECT_EQ(state.udsCalls, 3);
@@ -221,7 +226,7 @@ TEST(DomainMigrationAdmissionTest, BusySurvivesDiagnosticFailure)
             throw std::bad_alloc();
         }
     });
-    EXPECT_EQ(DomainMigrate(conn, "test-domain-2", "qemu+tls://192.168.1.100/system", MIGRATE_UNDEFINE_SOURCE),
+    EXPECT_EQ(DomainMigrate(conn, "test-domain-2", "qemu+tls://192.168.1.100/system", MIGRATE_UNDEFINE_SOURCE).rc,
               VirtrustRc::BUSY);
     Logger::Instance()->Reset();
     state.udsResultOverride = -999;

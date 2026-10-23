@@ -31,6 +31,7 @@
 #include "virtrust/crypto/sm3.h"
 #include "virtrust/dllib/libvirt.h"
 #include "virtrust/link/grpc_client.h"
+#include "virtrust/link/migration_destination_uri.h"
 #include "virtrust/utils/file_io.h"
 #include "virtrust/utils/foreign_mounter.h"
 #include "virtrust/utils/virt_xml_parser.h"
@@ -970,18 +971,30 @@ VirtrustRc DomainList(const std::unique_ptr<ConnCtx> &conn, unsigned int flags,
     return VirtrustRc::OK;
 }
 
-VirtrustRc DomainMigrate(const std::unique_ptr<ConnCtx> &conn, const std::string &domainName,
-                         const std::string &destUri, unsigned int flags)
+// 入口预检查均在向守护进程发起 UDS 请求之前完成，不会启动迁移副作用。
+static MigrationResult MigrationPreflightFailure()
+{
+    MigrationResult result;
+    result.outcome = MigrationOutcome::FailedBeforeEffect;
+    result.primaryError = {MigrationStage::Preflight, MigrationSide::Source, MigrationOperation::Validate,
+                           MigrationErrorOrigin::Validation, false, 0};
+    result.hasPrimaryError = true;
+    result.manualCheckRequired = false;
+    return result;
+}
+
+MigrationResult DomainMigrate(const std::unique_ptr<ConnCtx> &conn, const std::string &domainName,
+                              const std::string &destUri, unsigned int flags)
 {
     VIRTRUST_LOG_DEBUG("|DomainMigrate||START||start migrate");
     if (conn == nullptr) {
         VIRTRUST_LOG_ERROR("|DomainMigrate|END|returnF|| ConnCtx is nullptr.");
-        return VirtrustRc::ERROR;
+        return MigrationPreflightFailure();
     }
     // 源端查询和本地 UDS 请求必须对应同一个节点；连接 URI 仅允许明确的本机形式。
     if (!IsLocalMigrationSourceUri(conn->GetUri())) {
         VIRTRUST_LOG_ERROR("|DomainMigrate|SourceUri|Unsupported migration source URI: {}", conn->GetUri());
-        return VirtrustRc::ERROR;
+        return MigrationPreflightFailure();
     }
     // 源端守护进程持有迁移独占资格；API 不跨同步 UDS 调用持旧业务锁。
     // 命令行及 API 默认参数传入删除源端标志；此处补齐离线和目的端持久化标志，离线迁移必须指定VIR_MIGRATE_PERSIST_DEST
@@ -990,19 +1003,22 @@ VirtrustRc DomainMigrate(const std::unique_ptr<ConnCtx> &conn, const std::string
     if (flags != (VIR_MIGRATE_OFFLINE | VIR_MIGRATE_PERSIST_DEST | MIGRATE_UNDEFINE_SOURCE)) {
         VIRTRUST_LOG_ERROR("|DomainMigrate|END|returnF|invalid flags, only support {}",
                            static_cast<unsigned int>(MIGRATE_UNDEFINE_SOURCE));
-        return VirtrustRc::ERROR;
+        return MigrationPreflightFailure();
     }
-    if (destUri.empty() || destUri.find("qemu+tls://") != 0) {
-        VIRTRUST_LOG_ERROR("|DomainMigrate|END|returnF|destUri is only support starts with qemu+tls://");
-        return VirtrustRc::ERROR;
+    std::string destIp;
+    if (!ParseMigrationDestinationUri(destUri, destIp)) {
+        // 非法 URI 可能包含凭据或查询文本，不将调用方原文写入日志。
+        VIRTRUST_LOG_ERROR("|DomainMigrate|DestinationUri|Invalid destination URI");
+        return MigrationPreflightFailure();
     }
     // 校验虚拟机是否tsb和virsh都存在 并获取uuid
     std::unordered_map<std::string, DomainInfo> domainInfos;
+    // 此处先确定请求目标 UUID；守护进程取得独占资格后还会复核，不能依赖此查询防并发变化。
     // 查询全部状态并进行一致性检查，随后仅选择已关机目标；收窄查询范围须另行评估检查语义。
     auto ret = DomainList(conn, LIST_DOMAINS_ACTIVE | LIST_DOMAINS_INACTIVE, domainInfos, false);
     if (ret != VirtrustRc::OK) {
         VIRTRUST_LOG_ERROR("|DomainMigrate|END|returnF|failed to get domainInfos");
-        return VirtrustRc::ERROR;
+        return MigrationPreflightFailure();
     }
     std::string uuid;
     bool exists = std::any_of(domainInfos.begin(), domainInfos.end(), [&domainName, &uuid](const auto &pair) {
@@ -1014,9 +1030,10 @@ VirtrustRc DomainMigrate(const std::unique_ptr<ConnCtx> &conn, const std::string
     });
     if (!exists) {
         VIRTRUST_LOG_ERROR("|DomainMigrate|END|returnF|domain: {} not exist or state is not shut off", domainName);
-        return VirtrustRc::ERROR;
+        return MigrationPreflightFailure();
     }
 
+    // API 只向本机守护进程提交请求；迁移期间的节点独占资格由守护进程持有。
     LinkConfig config;
     config.udsPath = UDS_PATH;
     UdsClient client(config);
@@ -1030,24 +1047,25 @@ VirtrustRc DomainMigrate(const std::unique_ptr<ConnCtx> &conn, const std::string
         .flags = flags,
     };
 
+    // UDS 返回结果包含跨节点执行和源端清理的最终诊断，不能再压缩成单一错误码。
     auto retClient = client.DomainMigrate(migration_config);
-    if (retClient == static_cast<int32_t>(VirtrustRc::BUSY)) {
+    if (retClient.rc == VirtrustRc::BUSY) {
         // 守护进程已给出 Busy；日志设施异常不能再把它改写为未捕获异常。
         try {
             VIRTRUST_LOG_ERROR("|DomainMigrate|Admission|Source node is busy: domainName={}", domainName);
         } catch (...) {
             LogAdmissionFailureNoThrow("DomainMigrate", "Source node is busy; detailed diagnostics unavailable");
         }
-        return VirtrustRc::BUSY;
+        return retClient;
     }
-    if (retClient != 0) {
-        VIRTRUST_LOG_ERROR("|DomainMigrate|END|returnF|DomainMigrate failed domainName: {}, retClient:{}", domainName,
-                           retClient);
-        return VirtrustRc::ERROR;
+    if (retClient.rc != VirtrustRc::OK) {
+        VIRTRUST_LOG_ERROR("|DomainMigrate|END|returnF|DomainMigrate failed domainName: {}, rc:{}", domainName,
+                           static_cast<uint32_t>(retClient.rc));
+        return retClient;
     }
 
     VIRTRUST_LOG_DEBUG("|DomainMigrate||END|returnS||migrate domainName: {} success", domainName);
-    return VirtrustRc::OK;
+    return retClient;
 }
 
 VirtrustRc DomainStart(const std::unique_ptr<ConnCtx> &conn, const std::string &domainName, unsigned int flags,

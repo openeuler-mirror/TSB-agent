@@ -13,6 +13,10 @@ set(VIRTRUST_SH_SOURCE_FILES
 add_virtrust_sh_test_if(op_create_test)
 add_virtrust_sh_test_if(op_start_test)
 add_virtrust_sh_test_if(op_migrate_test)
+if(BUILD_TEST)
+  target_link_options(op_migrate_test PRIVATE
+    "LINKER:--wrap=_ZN8virtrust13DomainMigrateERKSt10unique_ptrINS_7ConnCtxESt14default_deleteIS1_EERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEESE_j")
+endif()
 add_virtrust_sh_test_if(op_destroy_test)
 add_virtrust_sh_test_if(op_list_test)
 add_virtrust_sh_test_if(op_undefine_test)
