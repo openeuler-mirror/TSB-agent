@@ -28,6 +28,7 @@ public:
     VIRTRUST_LINK_BUILDER_ADD(const std::string &, skPath)
     VIRTRUST_LINK_BUILDER_ADD(const std::string &, ip)
     VIRTRUST_LINK_BUILDER_ADD(uint16_t, port)
+    VIRTRUST_LINK_BUILDER_ADD(uint16_t, sourceCleanupMaxAttempts)
 
 #undef VIRTRUST_LINK_BUILDER_ADD
 

@@ -7,6 +7,7 @@
 #include <fstream>
 #include <string>
 #include <system_error>
+#include <utility>
 
 #include "gtest/gtest.h"
 #include "libvirtrustd/defines.h"
@@ -123,7 +124,8 @@ TEST_F(UtilsTest, ParseFullConfig)
         "skPath": "/etc/virtrust/server-sk.pem",
         "ip": "192.168.10.10",
         "udsPath": "/run/virtrust/rpc.sock",
-        "port": 8888
+        "port": 8888,
+        "sourceCleanupMaxAttempts": 2
     })");
 
     ASSERT_FALSE(path.empty());
@@ -135,6 +137,7 @@ TEST_F(UtilsTest, ParseFullConfig)
     EXPECT_EQ(config->ip, "192.168.10.10");
     EXPECT_EQ(config->udsPath, "/run/virtrust/rpc.sock");
     EXPECT_EQ(config->port, 8888);
+    EXPECT_EQ(config->sourceCleanupMaxAttempts, 2);
 }
 
 // 空 JSON 对象中缺失的配置项使用 defines.h 中各自的默认值。
@@ -157,6 +160,34 @@ TEST_F(UtilsTest, MissingKeysUseDefaultValues)
     EXPECT_EQ(config->udsPath, "/run/virtrust/rpc.sock");
     EXPECT_EQ(UDS_PATH, LIBVIRTRUSTD_UDS_PATH);
     EXPECT_EQ(config->port, LIBVIRTRUSTD_SERVER_PORT);
+    EXPECT_EQ(config->sourceCleanupMaxAttempts, 3);
+}
+
+// 清理次数明确配置时只接受整数 1–10，避免零次清理或超量重复调用。
+TEST_F(UtilsTest, RejectsInvalidSourceCleanupAttempts)
+{
+    for (const char *content : {R"({"sourceCleanupMaxAttempts":0})", R"({"sourceCleanupMaxAttempts":11})",
+                                R"({"sourceCleanupMaxAttempts":-1})", R"({"sourceCleanupMaxAttempts":1.5})",
+                                R"({"sourceCleanupMaxAttempts":"3"})", R"({"sourceCleanupMaxAttempts":null})"}) {
+        SCOPED_TRACE(content);
+        const auto path = WriteTempConfig("invalid_cleanup_attempts.json", content);
+        ASSERT_FALSE(path.empty());
+        EXPECT_FALSE(MakeLinkConfigFromJsonFile(path).has_value());
+    }
+}
+
+TEST_F(UtilsTest, AcceptsSourceCleanupAttemptBounds)
+{
+    for (const auto &[content, expected] :
+         {std::pair{R"({"sourceCleanupMaxAttempts":1})", 1},
+          std::pair{R"({"sourceCleanupMaxAttempts":10})", 10}}) {
+        SCOPED_TRACE(content);
+        const auto path = WriteTempConfig("valid_cleanup_attempts.json", content);
+        ASSERT_FALSE(path.empty());
+        const auto config = MakeLinkConfigFromJsonFile(path);
+        ASSERT_TRUE(config.has_value());
+        EXPECT_EQ(config->sourceCleanupMaxAttempts, expected);
+    }
 }
 
 // UDS 配置只接受固定生产路径，错误类型和嵌入空字符不得退回默认值或截断后接受。
