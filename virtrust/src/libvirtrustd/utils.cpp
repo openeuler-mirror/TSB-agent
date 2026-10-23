@@ -152,6 +152,7 @@ LinkConfig ParseJsonDocToConfig(const rapidjson::Document &jsonDoc)
     FIND_KEY(ip, std::string, std::string(LIBVIRTRUSTD_SERVER_ADDR));
     FIND_KEY(udsPath, std::string, std::string(LIBVIRTRUSTD_UDS_PATH));
     FIND_KEY(port, uint16_t, LIBVIRTRUSTD_SERVER_PORT);
+    FIND_KEY(sourceCleanupMaxAttempts, uint16_t, DEFAULT_SOURCE_CLEANUP_MAX_ATTEMPTS);
 
 #undef FIND_KEY
     return configBuidler.Build();
@@ -171,6 +172,16 @@ std::optional<LinkConfig> MakeLinkConfigFromJsonFile(const std::string &configPa
         const auto &path = (*jsonDoc)["udsPath"];
         if (!path.IsString() || std::string_view(path.GetString(), path.GetStringLength()) != LIBVIRTRUSTD_UDS_PATH) {
             VIRTRUST_LOG_ERROR("Invalid udsPath: expected the fixed endpoint {}", LIBVIRTRUSTD_UDS_PATH);
+            return std::nullopt;
+        }
+    }
+    // 显式清理次数必须有界；不能把错误类型静默替换成缺省值。
+    if (jsonDoc->HasMember("sourceCleanupMaxAttempts")) {
+        const auto &attempts = (*jsonDoc)["sourceCleanupMaxAttempts"];
+        if (!attempts.IsUint() || attempts.GetUint() < 1 ||
+            attempts.GetUint() > MAX_SOURCE_CLEANUP_MAX_ATTEMPTS) {
+            VIRTRUST_LOG_ERROR("Invalid sourceCleanupMaxAttempts: expected an integer from 1 to {}",
+                               MAX_SOURCE_CLEANUP_MAX_ATTEMPTS);
             return std::nullopt;
         }
     }

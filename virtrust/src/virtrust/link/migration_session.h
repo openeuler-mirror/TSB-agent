@@ -16,6 +16,7 @@
 #include "virtrust/api/context.h"
 #include "virtrust/base/node_admission.h"
 #include "virtrust/link/grpc_client.h"
+#include "virtrust/link/migration_result.h"
 #include "virtrust/utils/async_timer.h"
 
 namespace virtrust {
@@ -50,6 +51,9 @@ public:
     // 让manager删掉自己
     void Cleanup();
 
+    // 返回已确认的迁移诊断快照；会话清理后仍可由当前持有者读取。
+    MigrationResult Diagnostic() const;
+
     const std::string &Id() const
     {
         return uuid_;
@@ -69,7 +73,7 @@ public:
 
     MigrateSessionRc OnStartMigrationRequestReceived();
 
-    MigrateSessionRc OnTransferDataRequestReceived(const protos::VRsourceInfoRequest *request, int32_t &result);
+    MigrateSessionRc OnTransferDataRequestReceived(const protos::VRsourceInfoRequest *request);
 
     MigrateSessionRc OnFinishedRequestReceived(bool finished);
 
@@ -105,7 +109,7 @@ private:
     MigrateSessionRc ExchangeResponderKey(const protos::EXchangePkAndReportRequest *request,
                                           protos::EXchangePkAndReportReply *response);
     MigrateSessionRc BeginResponderTransfer();
-    MigrateSessionRc ImportResponderData(const protos::VRsourceInfoRequest *request, int32_t &result);
+    MigrateSessionRc ImportResponderData(const protos::VRsourceInfoRequest *request);
     MigrateSessionRc FinishResponder(bool finished);
 
     // 这几个是收到对端应答时要调用的
@@ -159,7 +163,23 @@ private:
 
     MigrateSessionRc UndefineVirtDomainBaseUri(const std::string &uri);
 
+    // 目的端明确完成后，先删源端可信资源，再删源端虚机定义；两步各自有限尝试。
+    MigrateSessionRc CleanupSourceResources();
+
     MigrateSessionRc NotifyVRMigration(bool success);
+
+    void RecordFailure(MigrationStage stage, MigrationSide side, MigrationOperation operation,
+                       MigrationErrorOrigin origin, bool hasRawCode = false, int32_t rawCode = 0,
+                       MigrationOutcome outcome = MigrationOutcome::Unknown);
+
+    // 仅在收到有效业务回复后合并目的端根因；不以远端位集覆盖源端已确认步骤。
+    void RecordPeerFailure(const protos::MigrationDiagnostic &diagnostic, VirtrustRc rc,
+                           MigrationStage fallbackStage, MigrationOperation fallbackOperation);
+
+    void ConfirmStep(MigrationStep step);
+    void MarkSuccess();
+    void AddCompensationError(MigrationStage stage, MigrationSide side, MigrationOperation operation,
+                              MigrationErrorOrigin origin, bool hasRawCode = false, int32_t rawCode = 0) noexcept;
 
     MigrateSessionRc ExportTcm2Key(std::string &tcm2Key);
 
@@ -176,9 +196,10 @@ private:
 
     // 响应方跨 RPC 持有目的端独占资格；与状态、定时器和清理共用同一同步边界。
     NodeAdmission admission_;
-    std::recursive_mutex operationMutex_;
+    mutable std::recursive_mutex operationMutex_;
     uint64_t timerGeneration_ = 0;
     bool cleanedUp_ = false;
+    MigrationResult result_;
 
     // 仅 Initiator 侧使用
     std::unique_ptr<RpcClient> rpcClient_;

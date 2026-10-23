@@ -176,7 +176,8 @@ rpm -e TSB-agent
     "skPath": "/etc/virtrust/certs/server-key.pem",
     "ip": "127.0.0.1",
     "port": 5031,
-    "udsPath": "/run/virtrust/rpc.sock"
+    "udsPath": "/run/virtrust/rpc.sock",
+    "sourceCleanupMaxAttempts": 3
 }
 ```
 
@@ -188,6 +189,7 @@ rpm -e TSB-agent
 - `ip`：服务器监听地址，默认为 "127.0.0.1"
 - `port`：TCP 监听端口，缺省为 `5031`；修改时还须核对对端配置
 - `udsPath`：可以省略，或显式填写 `/run/virtrust/rpc.sock`；其他值（包括旧 `/tmp/grpc.sock`、空串及非字符串）使配置加载失败，不会静默替换
+- `sourceCleanupMaxAttempts`：迁移目的端确认成功后，源端删除 VRoot 和取消 libvirt 定义各自的最大总尝试次数；缺省为 `3`，显式值只接受整数 `1`–`10`。次数有界不保证单次底层调用有时间上限
 
 字段名区分大小写，使用上面的驼峰名称，不使用 `ca_path` 等下划线名称。缺省证书路径是绝对路径；需要启用 TLS 时，三份证书文件仍须实际存在且可读，也可以显式配置其他可读的绝对路径。仅省略证书字段不会关闭 TLS。
 

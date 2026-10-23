@@ -6,6 +6,7 @@
 #include <string_view>
 
 #include "virtrust/api/defines.h"
+#include "virtrust/link/migration_result.h"
 
 namespace virtrust {
 constexpr std::string_view VIRTRUST_VERSION = "1.0.0";
@@ -48,6 +49,7 @@ public:
     VirshMeasureInfo initrd;
 };
 
-VirtrustRc CheckMaxDomainCount();
+// 容量达到上限与可信组件查询失败都返回 ERROR，迁移调用方可通过 failure 区分原因。
+VirtrustRc CheckMaxDomainCount(MigrationError *failure = nullptr);
 
 } // namespace virtrust

@@ -14,28 +14,48 @@
 namespace virtrust {
 namespace {
 constexpr int OP_MIGRATE_EXTRA_CMD_NUM = 2;
+
+// CLI 尚未进入迁移 API 时，也用同一固定格式展示确定未开始的预检查错误。
+void PrintMigrationPreflightFailure(MigrationOperation operation, MigrationErrorOrigin origin)
+{
+    MigrationResult result;
+    result.outcome = MigrationOutcome::FailedBeforeEffect;
+    result.manualCheckRequired = false;
+    result.primaryError = {MigrationStage::Preflight, MigrationSide::Source, operation, origin, false, 0};
+    result.hasPrimaryError = true;
+    fmt::print(stderr, "{}\n", FormatMigrationResult(result));
+}
 }
 
 OpRc OpMigrate::Exec()
 {
     // CLI 在打开 libvirt 连接之前拒绝远端源，避免无效请求也触达其他节点。
     if (!IsLocalMigrationSourceUri(config_.uri)) {
-        VIRTRUST_LOG_ERROR("Unsupported migration source URI: {}", config_.uri);
+        VIRTRUST_LOG_ERROR("Unsupported migration source URI");
+        PrintMigrationPreflightFailure(MigrationOperation::Validate, MigrationErrorOrigin::Validation);
         return OpRc::ERROR;
     }
     // make connection
     conn_.reset();
     conn_ = std::make_unique<ConnCtx>();
     if (!conn_->SetUri(config_.uri)) {
-        VIRTRUST_LOG_ERROR("Failed to set uri: {}", config_.uri);
+        VIRTRUST_LOG_ERROR("Failed to set migration source URI");
+        PrintMigrationPreflightFailure(MigrationOperation::Validate, MigrationErrorOrigin::Validation);
         return OpRc::ERROR;
     }
     conn_->Connect();
     if (conn_->Get() == nullptr) {
-        VIRTRUST_LOG_ERROR("Failed to establish connection to: {}", config_.uri);
+        VIRTRUST_LOG_ERROR("Failed to establish source libvirt connection");
+        PrintMigrationPreflightFailure(MigrationOperation::ConnectLibvirt, MigrationErrorOrigin::Libvirt);
         return OpRc::ERROR;
     }
-    return ParseVirtrustRc(DomainMigrate(conn_, domainName_, destUri_, flags_));
+    // API 返回业务最终状态及错误证据；命令行不再从日志反推迁移是否完成。
+    const auto result = DomainMigrate(conn_, domainName_, destUri_, flags_);
+    // Busy 继续由主命令统一提示“未开始”；其他迁移失败只输出结构化的固定字段。
+    if (result.rc != VirtrustRc::OK && result.rc != VirtrustRc::BUSY) {
+        fmt::print(stderr, "{}\n", FormatMigrationResult(result));
+    }
+    return ParseVirtrustRc(result.rc);
 }
 
 // Parse the args from command line

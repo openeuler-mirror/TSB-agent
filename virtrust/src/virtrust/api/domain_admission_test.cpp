@@ -157,7 +157,7 @@ TEST(DomainMigrationAdmissionTest, SendsValidMigrationWithoutOpeningLegacyLock)
     state.legacyOpens = state.udsCalls = 0;
     state.failLegacyOpen = true;
     state.udsResultOverride = 0;
-    EXPECT_EQ(DomainMigrate(conn, "test-domain-2", "qemu+tls://192.168.1.100/system", MIGRATE_UNDEFINE_SOURCE),
+    EXPECT_EQ(DomainMigrate(conn, "test-domain-2", "qemu+tls://192.168.1.100/system", MIGRATE_UNDEFINE_SOURCE).rc,
               VirtrustRc::OK);
     EXPECT_EQ(state.legacyOpens, 0);
     EXPECT_EQ(state.udsCalls, 1);
@@ -173,12 +173,82 @@ TEST(DomainMigrationAdmissionTest, RejectsRemoteSourceBeforeBusinessQueryOrUds)
     auto &state = test::AdmissionState();
     state.businessCalls = state.legacyOpens = state.udsCalls = 0;
     state.udsResultOverride = 0;
-    EXPECT_EQ(DomainMigrate(conn, "test-domain-2", "qemu+tls://192.168.1.100/system", MIGRATE_UNDEFINE_SOURCE),
+    EXPECT_EQ(DomainMigrate(conn, "test-domain-2", "qemu+tls://192.168.1.100/system", MIGRATE_UNDEFINE_SOURCE).rc,
               VirtrustRc::ERROR);
     EXPECT_EQ(state.businessCalls, 0);
     EXPECT_EQ(state.legacyOpens, 0);
     EXPECT_EQ(state.udsCalls, 0);
     state.udsResultOverride = -999;
+}
+
+TEST(DomainMigrationAdmissionTest, RejectsDestinationHostnameBeforeUds)
+{
+    const auto conn = std::make_unique<ConnCtx>();
+    auto &state = test::AdmissionState();
+    state.udsCalls = 0;
+    state.udsResultOverride = 0;
+    const MigrationResult result = DomainMigrate(conn, "test-domain-2",
+        "qemu+tls://remote.example.com/system?hint=192.168.1.100", MIGRATE_UNDEFINE_SOURCE);
+    EXPECT_EQ(result.rc, VirtrustRc::ERROR);
+    EXPECT_EQ(result.outcome, MigrationOutcome::FailedBeforeEffect);
+    EXPECT_EQ(state.udsCalls, 0);
+    state.udsResultOverride = -999;
+}
+
+TEST(DomainMigrationAdmissionTest, TsbListFailureKeepsPreflightOriginAndRawCode)
+{
+    auto conn = std::make_unique<ConnCtx>();
+    ASSERT_TRUE(conn->Connect());
+    auto &state = test::AdmissionState();
+    state.getVRootsOverride = -71;
+    state.udsCalls = 0;
+    const auto result = DomainMigrate(conn, "test-domain-2", "qemu+tls://192.168.1.100/system",
+                                      MIGRATE_UNDEFINE_SOURCE);
+    EXPECT_EQ(result.rc, VirtrustRc::ERROR);
+    EXPECT_EQ(result.outcome, MigrationOutcome::FailedBeforeEffect);
+    EXPECT_TRUE(result.hasPrimaryError);
+    EXPECT_EQ(result.primaryError.stage, MigrationStage::Preflight);
+    EXPECT_EQ(result.primaryError.operation, MigrationOperation::GetDescription);
+    EXPECT_EQ(result.primaryError.origin, MigrationErrorOrigin::Tsb);
+    EXPECT_TRUE(result.primaryError.hasRawCode);
+    EXPECT_EQ(result.primaryError.rawCode, -71);
+    EXPECT_EQ(state.udsCalls, 0);
+    state.getVRootsOverride = 0;
+}
+
+TEST(DomainMigrationAdmissionTest, MalformedSuccessfulTsbOutputIsInternalWithoutRawCode)
+{
+    auto conn = std::make_unique<ConnCtx>();
+    ASSERT_TRUE(conn->Connect());
+    auto &state = test::AdmissionState();
+    for (const int malformed : {1, 2}) {
+        SCOPED_TRACE(malformed);
+        state.malformedGetVRoots = malformed;
+        state.udsCalls = 0;
+        const auto result = DomainMigrate(conn, "test-domain-2", "qemu+tls://192.168.1.100/system",
+                                          MIGRATE_UNDEFINE_SOURCE);
+        EXPECT_EQ(result.outcome, MigrationOutcome::FailedBeforeEffect);
+        EXPECT_TRUE(result.hasPrimaryError);
+        EXPECT_EQ(result.primaryError.operation, MigrationOperation::GetDescription);
+        EXPECT_EQ(result.primaryError.origin, MigrationErrorOrigin::Internal);
+        EXPECT_FALSE(result.primaryError.hasRawCode);
+        EXPECT_EQ(state.udsCalls, 0);
+    }
+    state.malformedGetVRoots = 0;
+}
+
+TEST(DomainMigrationAdmissionTest, InvalidListArgumentsReportValidationCause)
+{
+    std::unordered_map<std::string, DomainInfo> domains;
+    MigrationError failure;
+    EXPECT_EQ(DomainList(nullptr, LIST_DOMAINS_ACTIVE, domains, false, &failure), VirtrustRc::ERROR);
+    EXPECT_EQ(failure.operation, MigrationOperation::Validate);
+    EXPECT_EQ(failure.origin, MigrationErrorOrigin::Validation);
+    auto conn = std::make_unique<ConnCtx>();
+    failure = {};
+    EXPECT_EQ(DomainList(conn, 0, domains, false, &failure), VirtrustRc::ERROR);
+    EXPECT_EQ(failure.operation, MigrationOperation::Validate);
+    EXPECT_EQ(failure.origin, MigrationErrorOrigin::Validation);
 }
 
 TEST(DomainMigrationAdmissionTest, OnlyExplicitLocalSourceUrisAreAllowed)
@@ -202,8 +272,13 @@ TEST(DomainMigrationAdmissionTest, MapsDaemonBusyButOtherFailuresRemainErrors)
              {1, VirtrustRc::ERROR},
              {-1, VirtrustRc::ERROR}}) {
         state.udsResultOverride = reply;
-        EXPECT_EQ(DomainMigrate(conn, "test-domain-2", "qemu+tls://192.168.1.100/system", MIGRATE_UNDEFINE_SOURCE),
-                  expected);
+        const auto result = DomainMigrate(conn, "test-domain-2", "qemu+tls://192.168.1.100/system",
+                                          MIGRATE_UNDEFINE_SOURCE);
+        EXPECT_EQ(result.rc, expected);
+        if (expected == VirtrustRc::BUSY) {
+            EXPECT_EQ(result.outcome, MigrationOutcome::FailedBeforeEffect);
+            EXPECT_FALSE(result.manualCheckRequired);
+        }
     }
     EXPECT_EQ(state.legacyOpens, 0);
     EXPECT_EQ(state.udsCalls, 3);
@@ -221,7 +296,7 @@ TEST(DomainMigrationAdmissionTest, BusySurvivesDiagnosticFailure)
             throw std::bad_alloc();
         }
     });
-    EXPECT_EQ(DomainMigrate(conn, "test-domain-2", "qemu+tls://192.168.1.100/system", MIGRATE_UNDEFINE_SOURCE),
+    EXPECT_EQ(DomainMigrate(conn, "test-domain-2", "qemu+tls://192.168.1.100/system", MIGRATE_UNDEFINE_SOURCE).rc,
               VirtrustRc::BUSY);
     Logger::Instance()->Reset();
     state.udsResultOverride = -999;

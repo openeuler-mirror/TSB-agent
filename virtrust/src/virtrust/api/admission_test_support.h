@@ -22,6 +22,9 @@ struct AdmissionTestState {
     int businessCalls = 0;
     int udsCalls = 0;
     int udsResultOverride = -999;
+    int getVRootsOverride = 0;
+    // 1 注入负数量，2 注入正数量但空指针；两者都模拟 TSB 返回成功后的畸形输出。
+    int malformedGetVRoots = 0;
     bool failLegacyOpen = false;
     bool throwInBusiness = false;
     // 仅供 fork 专用测试在 execv 前核对继承的节点准入描述符。
