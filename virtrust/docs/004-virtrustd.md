@@ -177,7 +177,10 @@ rpm -e TSB-agent
     "ip": "127.0.0.1",
     "port": 5031,
     "udsPath": "/run/virtrust/rpc.sock",
-    "sourceCleanupMaxAttempts": 3
+    "sourceCleanupMaxAttempts": 3,
+    "rpcRetryMaxAttempts": 3,
+    "rpcRetryInitialBackoffMs": 100,
+    "rpcRetryMaxBackoffMs": 1000
 }
 ```
 
@@ -190,6 +193,9 @@ rpm -e TSB-agent
 - `port`：TCP 监听端口，缺省为 `5031`；修改时还须核对对端配置
 - `udsPath`：可以省略，或显式填写 `/run/virtrust/rpc.sock`；其他值（包括旧 `/tmp/grpc.sock`、空串及非字符串）使配置加载失败，不会静默替换
 - `sourceCleanupMaxAttempts`：迁移目的端确认成功后，源端删除 VRoot 和取消 libvirt 定义各自的最大总尝试次数；缺省为 `3`，显式值只接受整数 `1`–`10`。次数有界不保证单次底层调用有时间上限
+- `rpcRetryMaxAttempts`：源端发起的每个节点间迁移 RPC 网络失败最大总尝试次数（含首次）；缺省 `3`，显式值 `1`–`10`。只重试临时 `UNAVAILABLE`，不重发整次迁移；目的端明确返回“原请求仍在处理”时可在同一阶段总期限内继续查询，不计入此次数
+- `rpcRetryInitialBackoffMs`：首次重试退避毫秒数，缺省 `100`，显式值 `1`–`1000`
+- `rpcRetryMaxBackoffMs`：指数退避的毫秒上限，缺省 `1000`，显式值 `1`–`5000` 且不得小于起始值；实际等待有 ±20% 抖动。信令阶段仍共用 5 秒、传输阶段仍共用 20 秒总期限，重试不叠加期限
 
 字段名区分大小写，使用上面的驼峰名称，不使用 `ca_path` 等下划线名称。缺省证书路径是绝对路径；需要启用 TLS 时，三份证书文件仍须实际存在且可读，也可以显式配置其他可读的绝对路径。仅省略证书字段不会关闭 TLS。
 

@@ -7,6 +7,7 @@
 #include <unistd.h>
 
 #include <chrono>
+#include <atomic>
 #include <climits>
 #include <cstring>
 #include <cstdlib>
@@ -47,6 +48,7 @@ struct DestinationTestState {
     std::string expectedOutstandingUuid;
     bool failPrepare = false;
     bool useRealPrepare = false;
+    bool delayPrepareForDuplicate = false;
     bool throwOnPrepare = false;
     bool throwOnStart = false;
     bool throwOnDiagnostic = false;
@@ -120,6 +122,12 @@ DestinationTestState &State()
 {
     static DestinationTestState state;
     return state;
+}
+
+std::atomic<bool> &PrepareEntered()
+{
+    static std::atomic<bool> entered{false};
+    return entered;
 }
 
 virDomainPtr ExpireSourceInsideLibvirt(virDomainPtr, virConnectPtr, virTypedParameterPtr,
@@ -399,6 +407,36 @@ TEST_F(DestinationMigrationAdmissionTest, RepeatedPrepareReplaysReplyWithoutRefr
     EXPECT_EQ(SessionManager::GetInstance().GetSession("destination-test-1"), session);
     EXPECT_EQ(State().timerCallbacks.size(), 1U);
     State().expectedOutstandingUuid = "destination-test-1";
+}
+
+TEST_F(DestinationMigrationAdmissionTest, ConcurrentIdenticalPrepareReturnsRetryableStatusWithoutReexecution)
+{
+    State().delayPrepareForDuplicate = true;
+    PrepareEntered().store(false);
+    protos::PrepareMigRequest request;
+    request.set_uuid("destination-test-1");
+    request.set_attempt_id(TestAttemptId(request.uuid()));
+    request.set_domainname("test-domain");
+    grpc::Status firstStatus;
+    std::thread first([&] {
+        protos::PrepareMigReply firstReply;
+        firstStatus = service_.PrepareMigration(nullptr, &request, &firstReply);
+    });
+    for (int index = 0; index < 100 && !PrepareEntered().load(); ++index) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    const bool entered = PrepareEntered().load();
+    grpc::Status duplicateStatus;
+    if (entered) {
+        protos::PrepareMigReply duplicateReply;
+        duplicateStatus = service_.PrepareMigration(nullptr, &request, &duplicateReply);
+    }
+    first.join();
+    ASSERT_TRUE(entered);
+    EXPECT_TRUE(firstStatus.ok());
+    EXPECT_EQ(duplicateStatus.error_code(), grpc::StatusCode::UNAVAILABLE);
+    EXPECT_EQ(duplicateStatus.error_details(), "virtrust.migration.step-in-progress");
+    State().expectedOutstandingUuid = request.uuid();
 }
 
 TEST_F(DestinationMigrationAdmissionTest, OldPrepareReplyIsNotReplayedIntoReplacementSession)
@@ -2130,6 +2168,10 @@ extern "C" virtrust::MigrateSessionRc WrappedDestinationPrepare(virtrust::Migrat
     asm("__wrap__ZN8virtrust16MigrationSession24OnMigrateRequestReceivedEv");
 extern "C" virtrust::MigrateSessionRc WrappedDestinationPrepare(virtrust::MigrationSession *session)
 {
+    if (virtrust::State().delayPrepareForDuplicate) {
+        virtrust::PrepareEntered().store(true);
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    }
     if (virtrust::State().throwOnPrepare) {
         throw std::runtime_error("Injected preparation failure");
     }

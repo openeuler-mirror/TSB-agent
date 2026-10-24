@@ -29,6 +29,10 @@ public:
     VIRTRUST_LINK_BUILDER_ADD(const std::string &, ip)
     VIRTRUST_LINK_BUILDER_ADD(uint16_t, port)
     VIRTRUST_LINK_BUILDER_ADD(uint16_t, sourceCleanupMaxAttempts)
+    // 三个字段随守护进程配置复制到源端 RpcClient，不影响目的端服务监听配置。
+    VIRTRUST_LINK_BUILDER_ADD(uint16_t, rpcRetryMaxAttempts)
+    VIRTRUST_LINK_BUILDER_ADD(uint16_t, rpcRetryInitialBackoffMs)
+    VIRTRUST_LINK_BUILDER_ADD(uint16_t, rpcRetryMaxBackoffMs)
 
 #undef VIRTRUST_LINK_BUILDER_ADD
 

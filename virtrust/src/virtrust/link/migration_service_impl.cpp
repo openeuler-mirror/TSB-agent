@@ -221,7 +221,9 @@ grpc::Status RunCached(MigrationReplayCache &cache, MigrationReplayCache::Step s
                 return grpc::Status::OK;
             case MigrationReplayCache::Decision::InProgress:
                 // 首个处理尚未完成，不能猜测其结果，也不能并发再次进入有副作用的业务。
-                return {grpc::StatusCode::ABORTED, "Migration step is already in progress"};
+                // 专用 details 与普通网络 UNAVAILABLE 区分：源端只在阶段期限内查询缓存完成结果。
+                return {grpc::StatusCode::UNAVAILABLE, "Migration step is already in progress",
+                        MIGRATION_STEP_IN_PROGRESS_DETAIL};
             case MigrationReplayCache::Decision::Conflict:
                 // 尝试身份和阶段相同但负载不同，不把它当作合法重试。
                 return {grpc::StatusCode::FAILED_PRECONDITION, "Migration step payload conflicts with prior request"};

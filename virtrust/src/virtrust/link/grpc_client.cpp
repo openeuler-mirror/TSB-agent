@@ -6,8 +6,12 @@
 
 #include <grpcpp/grpcpp.h>
 
+#include <algorithm>
+#include <chrono>
 #include <memory>
+#include <random>
 #include <string>
+#include <thread>
 
 #include "virtrust/base/str_utils.h"
 #include "virtrust/link/defines.h"
@@ -36,6 +40,88 @@ bool IsKnownBusinessResult(uint32_t value)
         default:
             return false;
     }
+}
+
+// 五个节点间 RPC 共用同一策略；总期限覆盖所有调用和退避，而不是每次重试重新计时。
+template <typename Reply, typename Call>
+int32_t InvokePeerWithRetry(const LinkConfig &config, uint32_t timeout, const char *operation,
+                            Reply *response, Call &&call)
+{
+    if (response == nullptr || timeout == 0) {
+        VIRTRUST_LOG_ERROR("{}: invalid reply or zero timeout", operation);
+        return RPC_TRANSPORT_FAILURE;
+    }
+    const std::string serverAddress = config.ip + ":" + std::to_string(config.port);
+    // 凭证和连接端点在本阶段只创建一次；重试只新建一次性 ClientContext。
+    auto credentials = grpc::InsecureChannelCredentials();
+    if (!config.caPath.empty() && !config.certPath.empty() && !config.skPath.empty()) {
+        grpc::SslCredentialsOptions options;
+        options.pem_root_certs = ReadFile(config.caPath);
+        options.pem_private_key = ReadFile(config.skPath);
+        options.pem_cert_chain = ReadFile(config.certPath);
+        credentials = grpc::SslCredentials(options);
+    }
+    const auto channel = grpc::CreateChannel(serverAddress, credentials);
+    auto stub = protos::MigrationService::NewStub(channel);
+    if (stub == nullptr) {
+        VIRTRUST_LOG_ERROR("{}: could not create gRPC stub", operation);
+        return RPC_TRANSPORT_FAILURE;
+    }
+
+    // 使用单调时钟计算总预算，防止退避及多次 RPC 各自获得完整的 5/20 秒。
+    const auto stageDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(timeout);
+    // JSON 入口已做严格校验；这里再次限界以约束直接构造 LinkConfig 的调用方。
+    const auto attempts = std::clamp<uint16_t>(config.rpcRetryMaxAttempts, 1, MAX_RPC_RETRY_MAX_ATTEMPTS);
+    const auto initialBackoff = std::clamp<uint16_t>(config.rpcRetryInitialBackoffMs, 1,
+                                                   MAX_RPC_RETRY_INITIAL_BACKOFF_MS);
+    const auto maxBackoff = std::clamp<uint16_t>(config.rpcRetryMaxBackoffMs, initialBackoff,
+                                               MAX_RPC_RETRY_MAX_BACKOFF_MS);
+    uint32_t nextBackoff = initialBackoff;
+    // networkFailures 只计一般 UNAVAILABLE；requestCount 包括“原请求仍在处理”的查询。
+    uint16_t networkFailures = 0;
+    uint32_t requestCount = 0;
+    while (true) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= stageDeadline) {
+            VIRTRUST_LOG_ERROR("{}: stage deadline exhausted before request {}", operation, requestCount + 1);
+            break;
+        }
+        // gRPC 的 ClientContext 只能使用一次；重试新建上下文，但请求对象和尝试身份始终不变。
+        grpc::ClientContext context;
+        context.set_deadline(std::chrono::system_clock::now() + (stageDeadline - now));
+        response->Clear();
+        ++requestCount;
+        const grpc::Status status = call(*stub, context, response);
+        if (status.ok()) {
+            return response->result();
+        }
+        // 目的端已明确确认原请求仍在执行：仅在阶段总期限内轮询，不耗尽网络失败的次数配额。
+        const bool inProgress = status.error_code() == grpc::StatusCode::UNAVAILABLE &&
+                                status.error_details() == MIGRATION_STEP_IN_PROGRESS_DETAIL;
+        // 业务失败、协议冲突或不可回放均不是本阶段可自动修复的网络抖动。
+        if (status.error_code() != grpc::StatusCode::UNAVAILABLE ||
+            (!inProgress && ++networkFailures >= attempts)) {
+            VIRTRUST_LOG_ERROR("{}: gRPC failed after {} request(s), code={}, detail={}", operation, requestCount,
+                               static_cast<int>(status.error_code()), status.error_message());
+            return RPC_TRANSPORT_FAILURE;
+        }
+        const auto remaining = stageDeadline - std::chrono::steady_clock::now();
+        // 发送失败后再次检查剩余时间，已到期就停止
+        if (remaining <= std::chrono::steady_clock::duration::zero()) {
+            VIRTRUST_LOG_ERROR("{}: stage deadline exhausted after {} request(s)", operation, requestCount);
+            return RPC_TRANSPORT_FAILURE;
+        }
+        // 与 gRPC 官方策略相同，对指数退避加入 ±20% 抖动以降低多个节点同时重试的冲击。
+        thread_local std::mt19937 generator(std::random_device{}());
+        std::uniform_int_distribution<uint32_t> jitter(nextBackoff * 80 / 100, nextBackoff * 120 / 100);
+        const auto delay = std::min(std::chrono::milliseconds(jitter(generator)),
+                                    std::chrono::duration_cast<std::chrono::milliseconds>(remaining));
+        VIRTRUST_LOG_WARN("{}: gRPC unavailable; retrying request {} after {} ms", operation, requestCount + 1,
+                          delay.count());
+        std::this_thread::sleep_for(delay);
+        nextBackoff = std::min(nextBackoff * 2, static_cast<uint32_t>(maxBackoff));
+    }
+    return RPC_TRANSPORT_FAILURE;
 }
 } // namespace
 
@@ -109,177 +195,49 @@ RpcClient::RpcClient(LinkConfig config) : config_(config)
 int32_t RpcClient::PrepareMigration(uint32_t timeout, const protos::PrepareMigRequest &request,
                                     protos::PrepareMigReply *response)
 {
-    std::string serverAddress = config_.ip + ":" + std::to_string(config_.port);
-    // 创建 SSL 凭证
-    auto channel_creds = grpc::InsecureChannelCredentials();
-    if (!config_.caPath.empty() && !config_.certPath.empty() && !config_.skPath.empty()) {
-        VIRTRUST_LOG_DEBUG("|PrepareMigration|||Connect in certificate form");
-        grpc::SslCredentialsOptions ssl_opts;
-        ssl_opts.pem_root_certs = ReadFile(config_.caPath);
-        // 设置客户端证书（如果需要）
-        ssl_opts.pem_private_key = ReadFile(config_.skPath);
-        ssl_opts.pem_cert_chain = ReadFile(config_.certPath);
-        channel_creds = grpc::SslCredentials(ssl_opts);
-    }
-
-    auto channel = grpc::CreateChannel(serverAddress, channel_creds);
-    std::unique_ptr<protos::MigrationService::Stub> stub = protos::MigrationService::NewStub(channel);
-
-    // 创建 ClientContext
-    grpc::ClientContext context;
-
-    // 设置超时
-    auto deadline = std::chrono::system_clock::now() + std::chrono::seconds(timeout);
-    context.set_deadline(deadline);
-    grpc::Status status = stub->PrepareMigration(&context, request, response);
-    if (!status.ok()) {
-        VIRTRUST_LOG_ERROR("|PrepareMigration|END|returnF|fail to triggle prepare migration:{}, serverAddress is: {}",
-                           status.error_message(), serverAddress);
-        return -1;
-    }
-    return response->result();
+    return InvokePeerWithRetry(config_, timeout, "PrepareMigration", response,
+                               [&](auto &stub, auto &context, auto *reply) {
+                                   return stub.PrepareMigration(&context, request, reply);
+                               });
 }
 
 // 2: 交换公钥
 int32_t RpcClient::ExchangePkAndReport(uint32_t timeout, const protos::EXchangePkAndReportRequest &request,
                                        protos::EXchangePkAndReportReply *response)
 {
-    std::string serverAddress = config_.ip + ":" + std::to_string(config_.port);
-
-    // 创建 SSL 凭证
-    auto channel_creds = grpc::InsecureChannelCredentials();
-    if (!config_.caPath.empty() && !config_.certPath.empty() && !config_.skPath.empty()) {
-        VIRTRUST_LOG_DEBUG("|ExchangePkAndReport|||Connect in certificate form");
-        grpc::SslCredentialsOptions ssl_opts;
-        ssl_opts.pem_root_certs = ReadFile(config_.caPath);
-        // 设置客户端证书（如果需要）
-        ssl_opts.pem_private_key = ReadFile(config_.skPath);
-        ssl_opts.pem_cert_chain = ReadFile(config_.certPath);
-        channel_creds = grpc::SslCredentials(ssl_opts);
-    }
-
-    std::shared_ptr<grpc::Channel> channel = grpc::CreateChannel(serverAddress, channel_creds);
-    std::unique_ptr<protos::MigrationService::Stub> stub = protos::MigrationService::NewStub(channel);
-
-    // 创建 ClientContext
-    grpc::ClientContext context;
-
-    // 设置超时
-    auto deadline = std::chrono::system_clock::now() + std::chrono::seconds(timeout);
-    context.set_deadline(deadline);
-    grpc::Status status = stub->ExchangePkAndReport(&context, request, response);
-    if (!status.ok()) {
-        VIRTRUST_LOG_ERROR(
-            "|ExchangePkAndReport|END|returnF|fail to triggle exchange pkandReport:{}, serverAddress is: {}",
-            status.error_message(), serverAddress);
-        return -1;
-    }
-    return response->result();
+    return InvokePeerWithRetry(config_, timeout, "ExchangePkAndReport", response,
+                               [&](auto &stub, auto &context, auto *reply) {
+                                   return stub.ExchangePkAndReport(&context, request, reply);
+                               });
 }
 
 // 3: 开始迁移
 int32_t RpcClient::StartMigration(uint32_t timeout, const protos::StartMigRequest &request,
                                   protos::StartMigReply *response)
 {
-    std::string serverAddress = config_.ip + ":" + std::to_string(config_.port);
-    // 创建 SSL 凭证
-    auto channel_creds = grpc::InsecureChannelCredentials();
-    if (!config_.caPath.empty() && !config_.certPath.empty() && !config_.skPath.empty()) {
-        VIRTRUST_LOG_DEBUG("|StartMigration|||Connect in certificate form");
-        grpc::SslCredentialsOptions ssl_opts;
-        ssl_opts.pem_root_certs = ReadFile(config_.caPath);
-        // 设置客户端证书（如果需要）
-        ssl_opts.pem_private_key = ReadFile(config_.skPath);
-        ssl_opts.pem_cert_chain = ReadFile(config_.certPath);
-        channel_creds = grpc::SslCredentials(ssl_opts);
-    }
-
-    std::shared_ptr<grpc::Channel> channel = grpc::CreateChannel(serverAddress, channel_creds);
-    std::unique_ptr<protos::MigrationService::Stub> stub = protos::MigrationService::NewStub(channel);
-
-    // 创建 ClientContext
-    grpc::ClientContext context;
-
-    // 设置超时
-    auto deadline = std::chrono::system_clock::now() + std::chrono::seconds(timeout);
-    context.set_deadline(deadline);
-    grpc::Status status = stub->StartMigration(&context, request, response);
-    if (!status.ok()) {
-        VIRTRUST_LOG_ERROR("|StartMigration|END|returnF|fail to triggle start migration:{}, serverAddress is: {}",
-                           status.error_message(), serverAddress);
-        return -1;
-    }
-    return response->result();
+    return InvokePeerWithRetry(config_, timeout, "StartMigration", response,
+                               [&](auto &stub, auto &context, auto *reply) {
+                                   return stub.StartMigration(&context, request, reply);
+                               });
 }
 
 // 4：迁移虚机密码资源
 int32_t RpcClient::SendVRsourceData(uint32_t timeout, const protos::VRsourceInfoRequest &request,
                                     protos::VRsourceInfoReply *response)
 {
-    std::string serverAddress = config_.ip + ":" + std::to_string(config_.port);
-    // 创建 SSL 凭证
-    auto channel_creds = grpc::InsecureChannelCredentials();
-    if (!config_.caPath.empty() && !config_.certPath.empty() && !config_.skPath.empty()) {
-        VIRTRUST_LOG_DEBUG("|SendVRsourceData|||Connect in certificate form");
-        grpc::SslCredentialsOptions ssl_opts;
-        ssl_opts.pem_root_certs = ReadFile(config_.caPath);
-        // 设置客户端证书（如果需要）
-        ssl_opts.pem_private_key = ReadFile(config_.skPath);
-        ssl_opts.pem_cert_chain = ReadFile(config_.certPath);
-        channel_creds = grpc::SslCredentials(ssl_opts);
-    }
-
-    std::shared_ptr<grpc::Channel> channel = grpc::CreateChannel(serverAddress, channel_creds);
-    std::unique_ptr<protos::MigrationService::Stub> stub = protos::MigrationService::NewStub(channel);
-
-    // 创建 ClientContext
-    grpc::ClientContext context;
-
-    // 设置超时
-    auto deadline = std::chrono::system_clock::now() + std::chrono::seconds(timeout);
-    context.set_deadline(deadline);
-    grpc::Status status = stub->SendVRsourceData(&context, request, response);
-    if (!status.ok()) {
-        VIRTRUST_LOG_ERROR("|SendVRsourceData|END|returnF|fail to triggle send vrsourceData:{}, serverAddress is: {}",
-                           status.error_message(), serverAddress);
-        return -1;
-    }
-    return response->result();
+    return InvokePeerWithRetry(config_, timeout, "SendVRsourceData", response,
+                               [&](auto &stub, auto &context, auto *reply) {
+                                   return stub.SendVRsourceData(&context, request, reply);
+                               });
 }
 
 // 5: 通知迁移结果
 int32_t RpcClient::NotifyVRMigrateResult(uint32_t timeout, const protos::MigrateResultRequest &request,
                                          protos::MigrateResultReply *response)
 {
-    std::string serverAddress = config_.ip + ":" + std::to_string(config_.port);
-    // 创建 SSL 凭证
-    auto channel_creds = grpc::InsecureChannelCredentials();
-    if (!config_.caPath.empty() && !config_.certPath.empty() && !config_.skPath.empty()) {
-        VIRTRUST_LOG_DEBUG("|NotifyVRMigrateResult|||Connect in certificate form");
-        grpc::SslCredentialsOptions ssl_opts;
-        ssl_opts.pem_root_certs = ReadFile(config_.caPath);
-        // 设置客户端证书（如果需要）
-        ssl_opts.pem_private_key = ReadFile(config_.skPath);
-        ssl_opts.pem_cert_chain = ReadFile(config_.certPath);
-        channel_creds = grpc::SslCredentials(ssl_opts);
-    }
-
-    std::shared_ptr<grpc::Channel> channel = grpc::CreateChannel(serverAddress, channel_creds);
-    std::unique_ptr<protos::MigrationService::Stub> stub = protos::MigrationService::NewStub(channel);
-
-    // 创建 ClientContext
-    grpc::ClientContext context;
-
-    // 设置超时
-    auto deadline = std::chrono::system_clock::now() + std::chrono::seconds(timeout);
-    context.set_deadline(deadline);
-    grpc::Status status = stub->NotifyVRMigrateResult(&context, request, response);
-    if (!status.ok()) {
-        VIRTRUST_LOG_ERROR(
-            "|NotifyVRMigrateResult|END|returnF|fail to triggle NotifyVRMigrateResult :{}, serverAddress is: {}",
-            status.error_message(), serverAddress);
-        return -1;
-    }
-    return response->result();
+    return InvokePeerWithRetry(config_, timeout, "NotifyVRMigrateResult", response,
+                               [&](auto &stub, auto &context, auto *reply) {
+                                   return stub.NotifyVRMigrateResult(&context, request, reply);
+                               });
 }
 }; // namespace virtrust

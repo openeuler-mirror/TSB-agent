@@ -153,6 +153,10 @@ LinkConfig ParseJsonDocToConfig(const rapidjson::Document &jsonDoc)
     FIND_KEY(udsPath, std::string, std::string(LIBVIRTRUSTD_UDS_PATH));
     FIND_KEY(port, uint16_t, LIBVIRTRUSTD_SERVER_PORT);
     FIND_KEY(sourceCleanupMaxAttempts, uint16_t, DEFAULT_SOURCE_CLEANUP_MAX_ATTEMPTS);
+    // 字段缺省时使用 LinkConfig 中同一组默认值；显式错误值已由外层入口拒绝。
+    FIND_KEY(rpcRetryMaxAttempts, uint16_t, DEFAULT_RPC_RETRY_MAX_ATTEMPTS);
+    FIND_KEY(rpcRetryInitialBackoffMs, uint16_t, DEFAULT_RPC_RETRY_INITIAL_BACKOFF_MS);
+    FIND_KEY(rpcRetryMaxBackoffMs, uint16_t, DEFAULT_RPC_RETRY_MAX_BACKOFF_MS);
 
 #undef FIND_KEY
     return configBuidler.Build();
@@ -184,6 +188,32 @@ std::optional<LinkConfig> MakeLinkConfigFromJsonFile(const std::string &configPa
                                MAX_SOURCE_CLEANUP_MAX_ATTEMPTS);
             return std::nullopt;
         }
+    }
+    // 三个参数分别验证类型和上限，再验证退避窗口关系，避免非法值被静默替换。
+    const auto validBounded = [&](const char *name, uint32_t maximum) {
+        if (!jsonDoc->HasMember(name)) {
+            return true;
+        }
+        const auto &value = (*jsonDoc)[name];
+        if (!value.IsUint() || value.GetUint() < 1 || value.GetUint() > maximum) {
+            VIRTRUST_LOG_ERROR("Invalid {}: expected an integer from 1 to {}", name, maximum);
+            return false;
+        }
+        return true;
+    };
+    if (!validBounded("rpcRetryMaxAttempts", MAX_RPC_RETRY_MAX_ATTEMPTS) ||
+        !validBounded("rpcRetryInitialBackoffMs", MAX_RPC_RETRY_INITIAL_BACKOFF_MS) ||
+        !validBounded("rpcRetryMaxBackoffMs", MAX_RPC_RETRY_MAX_BACKOFF_MS)) {
+        return std::nullopt;
+    }
+    // 单字段省略时也要与另一个字段比较，避免“显式最大值 < 缺省初值”的组合。
+    const auto initial = jsonDoc->HasMember("rpcRetryInitialBackoffMs") ?
+        (*jsonDoc)["rpcRetryInitialBackoffMs"].GetUint() : DEFAULT_RPC_RETRY_INITIAL_BACKOFF_MS;
+    const auto maximum = jsonDoc->HasMember("rpcRetryMaxBackoffMs") ?
+        (*jsonDoc)["rpcRetryMaxBackoffMs"].GetUint() : DEFAULT_RPC_RETRY_MAX_BACKOFF_MS;
+    if (maximum < initial) {
+        VIRTRUST_LOG_ERROR("Invalid RPC retry backoff: maximum must be at least the initial delay");
+        return std::nullopt;
     }
     return ParseJsonDocToConfig(jsonDoc.value());
 }
