@@ -438,6 +438,13 @@ MigrateSessionRc MigrationSession::SendTransferOnce(const std::string &cipher, c
                           MigrationErrorOrigin::Internal);
         }
         VIRTRUST_LOG_ERROR("|SendTransferOnce|END|returnF||failed to tansfer data for: {}, ret {}.", domainName_, ret);
+        if (ret == RPC_TRANSPORT_FAILURE) {
+            // 无有效回复时目的端可能仍在导入或已创建可信资源；不得并发撤销定义或发送失败通知。
+            VIRTRUST_LOG_ERROR("Transfer result unknown: uuid={}, attempt={}; preserve both nodes for manual "
+                               "verification", uuid_, attemptId_);
+            EnterState(State::Failed);
+            return MigrateSessionRc::ERROR;
+        }
         // 只有确实收到目的端业务回复，才允许读取诊断判断“原本就有此 UUID”。
         const auto &peerError = res.diagnostic().primary_error();
         const bool duplicateVroot = ret != RPC_TRANSPORT_FAILURE && res.has_diagnostic() &&
@@ -513,6 +520,9 @@ MigrateSessionRc MigrationSession::SendFinishedNotify(bool success)
             if (ret == RPC_TRANSPORT_FAILURE) {
                 RecordFailure(MigrationStage::DestinationCommit, MigrationSide::Source,
                               MigrationOperation::NotifyPeer, MigrationErrorOrigin::Grpc);
+                // 未取得回复不等于目的端未提交；日志保留尝试身份，供两端人工核查。
+                VIRTRUST_LOG_ERROR("Final migration reply unavailable: uuid={}, attempt={}; destination may have "
+                                   "committed. Verify both nodes before manually retrying.", uuid_, attemptId_);
             } else {
                 const auto businessRc = res.result() != 0 ? static_cast<VirtrustRc>(res.result()) : VirtrustRc::ERROR;
                 RecordPeerFailure(res.diagnostic(), businessRc, MigrationStage::DestinationCommit,
@@ -805,6 +815,21 @@ MigrateSessionRc MigrationSession::UndefineVirtDomainBaseUri(const std::string &
     }
 
     auto &libvirt = Libvirt::GetInstance();
+    // 目的端同名定义可能已被替换；只允许取消本次迁移 UUID 对应的定义。
+    char destinationUuid[sizeof(Description::uuid)]{};
+    if (libvirt.virDomainGetUUIDString(destDomain->Get(), destinationUuid) < 0) {
+        AddCompensationError(MigrationStage::DataTransfer, MigrationSide::Destination,
+                             MigrationOperation::CheckIdentity, MigrationErrorOrigin::Libvirt);
+        VIRTRUST_LOG_ERROR("Cannot verify destination domain UUID before compensation: name={}", domainName_);
+        return MigrateSessionRc::ERROR;
+    }
+    if (uuid_ != destinationUuid) {
+        AddCompensationError(MigrationStage::DataTransfer, MigrationSide::Destination,
+                             MigrationOperation::CheckIdentity, MigrationErrorOrigin::Validation);
+        VIRTRUST_LOG_ERROR("Destination domain UUID changed before compensation: name={}, expected={}",
+                           domainName_, uuid_);
+        return MigrateSessionRc::ERROR;
+    }
     const int undefineRet = libvirt.virDomainUndefineFlags(destDomain->Get(), DOMAIN_UNDEFINE_NVRAM);
     if (undefineRet != 0) {
         AddCompensationError(MigrationStage::DataTransfer, MigrationSide::Destination,

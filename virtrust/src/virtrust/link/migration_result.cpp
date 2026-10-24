@@ -254,6 +254,14 @@ std::string FormatMigrationResult(const MigrationResult &result)
         result.outcome == MigrationOutcome::Partial) {
         message += " Manual verification required.";
         message += " Do not retry automatically; verify both nodes first.";
+        // 最终通知无回复不代表目的端失败；只对这一明确的传输不确定场景追加专门提示。
+        if (result.outcome == MigrationOutcome::Unknown && result.hasPrimaryError &&
+            result.primaryError.stage == MigrationStage::DestinationCommit &&
+            result.primaryError.side == MigrationSide::Source &&
+            result.primaryError.operation == MigrationOperation::NotifyPeer &&
+            result.primaryError.origin == MigrationErrorOrigin::Grpc) {
+            message += " Destination may have committed despite the missing final reply.";
+        }
     }
     return message;
 }

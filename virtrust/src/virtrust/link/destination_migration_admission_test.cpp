@@ -92,6 +92,7 @@ struct DestinationTestState {
     bool failKeyExport = false;
     bool failSourceKeyImport = false;
     bool sourceDuplicateTransfer = false;
+    bool sourceTransferBusinessFailure = false;
     bool sourceTransferTransportFailure = false;
     bool failSourceFailureNotify = false;
     bool failSourceFailurePeerNotify = false;
@@ -167,6 +168,25 @@ int ReturnDifferentSourceUuid(virDomainPtr, char *uuid)
 int FailSourceUuidLookup(virDomainPtr, char *)
 {
     return -1;
+}
+
+// 源端迁移前仍返回本次 UUID；进入传输后模拟目的端同名定义被替换。
+int ReturnChangedDestinationUuid(virDomainPtr, char *uuid)
+{
+    constexpr char expected[] = "12345678-1234-1234-1234-123456789002";
+    constexpr char changed[] = "12345678-1234-1234-1234-123456789001";
+    std::memcpy(uuid, State().sourceDataCalls == 0 ? expected : changed, sizeof(expected));
+    return 0;
+}
+
+int FailDestinationUuidLookup(virDomainPtr, char *uuid)
+{
+    if (State().sourceDataCalls != 0) {
+        return -1;
+    }
+    constexpr char expected[] = "12345678-1234-1234-1234-123456789002";
+    std::memcpy(uuid, expected, sizeof(expected));
+    return 0;
 }
 
 virDomainPtr CountSourceMigration(virDomainPtr, virConnectPtr, virTypedParameterPtr,
@@ -1239,6 +1259,8 @@ TEST_F(DestinationMigrationAdmissionTest, FailureNotificationAfterImportReleases
 {
     constexpr const char *uuid = "12345678-1234-1234-1234-123456789010";
     ASSERT_TRUE(AdvanceToAwaitingFinish(uuid));
+    ASSERT_EQ(State().cipherImportCalls, 1);
+    ASSERT_EQ(State().createVRootCalls, 1);
     protos::MigrateResultRequest request;
     request.set_uuid(uuid);
     request.set_attempt_id(TestAttemptId(request.uuid()));
@@ -1247,6 +1269,9 @@ TEST_F(DestinationMigrationAdmissionTest, FailureNotificationAfterImportReleases
     ASSERT_TRUE(service_.NotifyVRMigrateResult(nullptr, &request, &reply).ok());
     EXPECT_EQ(reply.result(), static_cast<uint32_t>(VirtrustRc::OK));
     EXPECT_EQ(State().successNotificationCalls, 0);
+    // 失败通知只收会话，不会撤销已导入密文或删除目的端 VRoot。
+    EXPECT_EQ(State().removeCalls, 0);
+    EXPECT_EQ(State().createVRootCalls, 1);
     EXPECT_EQ(SessionManager::GetInstance().GetSession(uuid), nullptr);
     EXPECT_EQ(OrdinaryProbe(), LockOutcome::Acquired);
 }
@@ -1927,12 +1952,9 @@ TEST_F(DestinationMigrationAdmissionTest, DuplicateVrootDiagnosticDoesNotUndefin
     EXPECT_EQ(State().undefineCalls, 0);
 }
 
-TEST_F(DestinationMigrationAdmissionTest, TransferTransportFailureKeepsPrimaryAndListsCompensationFailures)
+TEST_F(DestinationMigrationAdmissionTest, TransferTransportFailurePreservesResourcesWithoutUnsafeCompensation)
 {
     State().sourceTransferTransportFailure = true;
-    State().undefineFailuresRemaining = 1;
-    State().failSourceFailureNotify = true;
-    State().failSourceFailurePeerNotify = true;
     EXPECT_EQ(RunSourceWithObservedUndefine(), MigrateSessionRc::ERROR);
     const auto &diagnostic = State().lastSourceDiagnostic;
     EXPECT_EQ(diagnostic.outcome, MigrationOutcome::Unknown);
@@ -1942,12 +1964,41 @@ TEST_F(DestinationMigrationAdmissionTest, TransferTransportFailureKeepsPrimaryAn
     EXPECT_EQ(diagnostic.primaryError.operation, MigrationOperation::NotifyPeer);
     EXPECT_EQ(diagnostic.primaryError.origin, MigrationErrorOrigin::Grpc);
     EXPECT_NE(diagnostic.confirmedSteps & static_cast<uint32_t>(MigrationStep::LibvirtTransferred), 0U);
-    ASSERT_EQ(diagnostic.compensationErrors.size(), 3U);
-    EXPECT_EQ(diagnostic.compensationErrors[0].operation, MigrationOperation::UndefineDomain);
-    EXPECT_EQ(diagnostic.compensationErrors[1].operation, MigrationOperation::NotifyTsb);
-    EXPECT_EQ(diagnostic.compensationErrors[2].operation, MigrationOperation::NotifyPeer);
+    EXPECT_TRUE(diagnostic.manualCheckRequired);
+    EXPECT_TRUE(diagnostic.compensationErrors.empty());
+    EXPECT_EQ(State().undefineCalls, 0);
+    EXPECT_EQ(State().clientNotifyCalls, 0);
+}
+
+TEST_F(DestinationMigrationAdmissionTest, TransferBusinessFailureDoesNotUndefineReplacedDestination)
+{
+    State().sourceTransferBusinessFailure = true;
+    ScopedSourceIdentityProbe probe(ReturnChangedDestinationUuid);
+    EXPECT_EQ(RunSourceWithObservedUndefine(), MigrateSessionRc::ERROR);
+    EXPECT_EQ(State().undefineCalls, 0);
+    const auto &diagnostic = State().lastSourceDiagnostic;
+    ASSERT_TRUE(diagnostic.hasPrimaryError);
+    EXPECT_EQ(diagnostic.primaryError.stage, MigrationStage::DataTransfer);
+    ASSERT_FALSE(diagnostic.compensationErrors.empty());
+    EXPECT_EQ(diagnostic.compensationErrors.front().operation, MigrationOperation::CheckIdentity);
+}
+
+TEST_F(DestinationMigrationAdmissionTest, TransferBusinessFailureDoesNotUndefineUnreadableDestination)
+{
+    State().sourceTransferBusinessFailure = true;
+    ScopedSourceIdentityProbe probe(FailDestinationUuidLookup);
+    EXPECT_EQ(RunSourceWithObservedUndefine(), MigrateSessionRc::ERROR);
+    EXPECT_EQ(State().undefineCalls, 0);
+    const auto &diagnostic = State().lastSourceDiagnostic;
+    ASSERT_FALSE(diagnostic.compensationErrors.empty());
+    EXPECT_EQ(diagnostic.compensationErrors.front().operation, MigrationOperation::CheckIdentity);
+}
+
+TEST_F(DestinationMigrationAdmissionTest, TransferBusinessFailureMayUndefineMatchingDestination)
+{
+    State().sourceTransferBusinessFailure = true;
+    EXPECT_EQ(RunSourceWithObservedUndefine(), MigrateSessionRc::ERROR);
     EXPECT_EQ(State().undefineCalls, 1);
-    EXPECT_EQ(State().clientNotifyCalls, 1);
 }
 
 // 最终 RPC 没有返回业务结果时，不推测目的端状态，也不启动源端删除。
@@ -2003,11 +2054,16 @@ TEST_F(DestinationMigrationAdmissionTest, SourceCleanupRejectsUnreadableDefiniti
 TEST_F(DestinationMigrationAdmissionTest, SourceTsbSuccessFailureCannotBeReportedAsSuccess)
 {
     State().failSourceSuccessNotify = true;
-    EXPECT_EQ(RunMockSource(), MigrateSessionRc::ERROR);
+    EXPECT_EQ(RunSourceWithObservedUndefine(), MigrateSessionRc::ERROR);
     EXPECT_EQ(State().successNotificationCalls, 1);
     EXPECT_EQ(State().clientNotifyCalls, 0);
+    EXPECT_EQ(State().removeCalls, 0);
+    EXPECT_EQ(State().undefineCalls, 0);
     const auto &diagnostic = State().lastSourceDiagnostic;
     EXPECT_EQ(diagnostic.outcome, MigrationOutcome::Unknown);
+    EXPECT_TRUE(diagnostic.manualCheckRequired);
+    EXPECT_NE(diagnostic.confirmedSteps & static_cast<uint32_t>(MigrationStep::DestinationDataAccepted), 0U);
+    EXPECT_EQ(diagnostic.confirmedSteps & static_cast<uint32_t>(MigrationStep::SourceTsbCommitted), 0U);
     ASSERT_TRUE(diagnostic.hasPrimaryError);
     EXPECT_EQ(diagnostic.primaryError.stage, MigrationStage::SourceCommit);
     EXPECT_EQ(diagnostic.primaryError.operation, MigrationOperation::NotifyTsb);
@@ -2403,6 +2459,15 @@ extern "C" int32_t WrappedDestinationClientTransfer(virtrust::RpcClientMock *sel
         error->set_origin(virtrust::protos::MIGRATION_ERROR_ORIGIN_TSB);
         error->set_has_raw_code(true);
         error->set_raw_code(ERR_DUPLICATE_UUID);
+        return static_cast<int32_t>(virtrust::VirtrustRc::ERROR);
+    }
+    if (virtrust::State().sourceTransferBusinessFailure) {
+        response->set_result(static_cast<uint32_t>(virtrust::VirtrustRc::ERROR));
+        auto *error = response->mutable_diagnostic()->mutable_primary_error();
+        error->set_stage(virtrust::protos::MIGRATION_STAGE_DATA_TRANSFER);
+        error->set_side(virtrust::protos::MIGRATION_SIDE_DESTINATION);
+        error->set_operation(virtrust::protos::MIGRATION_OPERATION_VALIDATE);
+        error->set_origin(virtrust::protos::MIGRATION_ERROR_ORIGIN_VALIDATION);
         return static_cast<int32_t>(virtrust::VirtrustRc::ERROR);
     }
     return RealDestinationClientTransfer(self, timeout, request, response);
