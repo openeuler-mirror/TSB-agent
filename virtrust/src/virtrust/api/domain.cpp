@@ -511,6 +511,8 @@ VirtrustRc SafeGetVRoots(int *tsbVmNum, Description **vtpcmInfos, MigrationError
 {
     int ret = GetVRoots(tsbVmNum, vtpcmInfos);
     if (ret != 0) {
+        // 底层可能已分配输出后才报错；失败时由此层回收，调用方无需接管无效数据。
+        FreeDescription(vtpcmInfos);
         if (failure != nullptr) {
             *failure = {MigrationStage::None, MigrationSide::Unknown, MigrationOperation::GetDescription,
                         MigrationErrorOrigin::Tsb, true, ret};
@@ -518,6 +520,8 @@ VirtrustRc SafeGetVRoots(int *tsbVmNum, Description **vtpcmInfos, MigrationError
         return VirtrustRc::ERROR;
     }
     if (*tsbVmNum < 0) {
+        // 数量无效时也不能把可能已分配的输出留给直接返回的调用方。
+        FreeDescription(vtpcmInfos);
         if (failure != nullptr) {
             *failure = {MigrationStage::None, MigrationSide::Unknown, MigrationOperation::GetDescription,
                         MigrationErrorOrigin::Internal, false, 0};
