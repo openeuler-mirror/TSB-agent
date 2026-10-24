@@ -31,6 +31,7 @@
 #include "virtrust/crypto/sm3.h"
 #include "virtrust/dllib/libvirt.h"
 #include "virtrust/link/grpc_client.h"
+#include "virtrust/link/migration_attempt_id.h"
 #include "virtrust/link/migration_destination_uri.h"
 #include "virtrust/utils/file_io.h"
 #include "virtrust/utils/foreign_mounter.h"
@@ -1027,6 +1028,25 @@ static MigrationResult MigrationPreflightFailure(MigrationError failure = {})
     return result;
 }
 
+MigrationFinalQueryResult DomainQueryMigrationFinalResult(const std::string &uuid, const std::string &destUri,
+                                                         const std::string &attemptId)
+{
+    // 与迁移 API 一样只允许 root 调用本机 UDS；查询本身不申请节点准入资格。
+    std::string destinationIp;
+    if (geteuid() != 0 || uuid.empty() || !ValidMigrationAttemptId(attemptId) ||
+        !ParseMigrationDestinationUri(destUri, destinationIp)) {
+        return {};
+    }
+    try {
+        LinkConfig config;
+        config.udsPath = UDS_PATH;
+        UdsClient client(config);
+        return client.QueryMigrationFinalResult(uuid, destUri, attemptId);
+    } catch (...) {
+        return {};
+    }
+}
+
 MigrationResult DomainMigrate(const std::unique_ptr<ConnCtx> &conn, const std::string &domainName,
                               const std::string &destUri, unsigned int flags)
 {
@@ -1091,6 +1111,13 @@ MigrationResult DomainMigrate(const std::unique_ptr<ConnCtx> &conn, const std::s
         .localUri = localUri,
         .flags = flags,
     };
+    // 请求前即确定身份：即使本机 UDS 回复丢失，CLI 仍能展示人工核查所需的尝试 ID。
+    try {
+        migration_config.attemptId = GenerateMigrationAttemptId();
+    } catch (...) {
+        return MigrationPreflightFailure({MigrationStage::Preflight, MigrationSide::Source,
+                                          MigrationOperation::Validate, MigrationErrorOrigin::Internal, false, 0});
+    }
 
     // UDS 返回结果包含跨节点执行和源端清理的最终诊断，不能再压缩成单一错误码。
     auto retClient = client.DomainMigrate(migration_config);

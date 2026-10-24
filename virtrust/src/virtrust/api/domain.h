@@ -50,6 +50,10 @@ VirtrustRc DomainDestroy(const std::unique_ptr<ConnCtx> &conn, const std::string
 MigrationResult DomainMigrate(const std::unique_ptr<ConnCtx> &conn, const std::string &domainName,
                               const std::string &destUri, unsigned int flags = MIGRATE_UNDEFINE_SOURCE);
 
+// 只读查询目的节点已记录的最终通知；UNKNOWN 不能证明迁移失败或可以重试。
+MigrationFinalQueryResult DomainQueryMigrationFinalResult(const std::string &uuid, const std::string &destUri,
+                                                         const std::string &attemptId);
+
 /**
  * 启动虚拟机
  * @param conn 连接参数

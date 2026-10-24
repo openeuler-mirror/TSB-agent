@@ -6,6 +6,7 @@ set(VIRTRUST_SH_SOURCE_FILES
     ${CMAKE_CURRENT_LIST_DIR}/op_create.cpp
     ${CMAKE_CURRENT_LIST_DIR}/op_start.cpp
     ${CMAKE_CURRENT_LIST_DIR}/op_migrate.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/op_migration_result.cpp
     ${CMAKE_CURRENT_LIST_DIR}/op_destroy.cpp
     ${CMAKE_CURRENT_LIST_DIR}/op_list.cpp
     ${CMAKE_CURRENT_LIST_DIR}/op_undefine.cpp)
@@ -13,6 +14,7 @@ set(VIRTRUST_SH_SOURCE_FILES
 add_virtrust_sh_test_if(op_create_test)
 add_virtrust_sh_test_if(op_start_test)
 add_virtrust_sh_test_if(op_migrate_test)
+add_virtrust_sh_test_if(op_migration_result_test)
 if(BUILD_TEST)
   target_link_options(op_migrate_test PRIVATE
     "LINKER:--wrap=_ZN8virtrust13DomainMigrateERKSt10unique_ptrINS_7ConnCtxESt14default_deleteIS1_EERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEESE_j")
