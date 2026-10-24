@@ -46,6 +46,8 @@ message PrepareMigRequest {
      string destUri = 3;
      string localUri = 4;
      uint32 flags = 5;
+     // 一次人工迁移命令在五个跨节点阶段中保持相同身份。
+     string attempt_id = 6;
 }
 
 message PrepareMigReply {
@@ -60,6 +62,7 @@ message EXchangePkAndReportRequest {
     bytes publicKey = 4;  //公钥
     TrustReportNew hostReport = 5; // struct
     TrustReportNew vmReport = 6; // struct
+    string attempt_id = 7;
 }
 
 message EXchangePkAndReportReply{
@@ -77,6 +80,7 @@ message EXchangePkAndReportReply{
 message StartMigRequest {
      string domainName = 1;
      string uuid = 2;
+     string attempt_id = 3;
 }
 
 message StartMigReply {
@@ -88,6 +92,7 @@ message VRsourceInfoRequest{
    bytes cipherData = 1;
    string uuid = 2;
    Description vtpcmInfo = 3;
+   string attempt_id = 4;
 }
 
 message  VRsourceInfoReply{
@@ -99,6 +104,7 @@ message MigrateResultRequest {
   uint32 result = 1;
   string domainName = 2;
   string uuid = 3;
+  string attempt_id = 4;
 }
 
 message MigrateResultReply {

@@ -125,7 +125,10 @@ TEST_F(UtilsTest, ParseFullConfig)
         "ip": "192.168.10.10",
         "udsPath": "/run/virtrust/rpc.sock",
         "port": 8888,
-        "sourceCleanupMaxAttempts": 2
+        "sourceCleanupMaxAttempts": 2,
+        "rpcRetryMaxAttempts": 4,
+        "rpcRetryInitialBackoffMs": 150,
+        "rpcRetryMaxBackoffMs": 900
     })");
 
     ASSERT_FALSE(path.empty());
@@ -138,6 +141,9 @@ TEST_F(UtilsTest, ParseFullConfig)
     EXPECT_EQ(config->udsPath, "/run/virtrust/rpc.sock");
     EXPECT_EQ(config->port, 8888);
     EXPECT_EQ(config->sourceCleanupMaxAttempts, 2);
+    EXPECT_EQ(config->rpcRetryMaxAttempts, 4);
+    EXPECT_EQ(config->rpcRetryInitialBackoffMs, 150);
+    EXPECT_EQ(config->rpcRetryMaxBackoffMs, 900);
 }
 
 // 空 JSON 对象中缺失的配置项使用 defines.h 中各自的默认值。
@@ -161,6 +167,9 @@ TEST_F(UtilsTest, MissingKeysUseDefaultValues)
     EXPECT_EQ(UDS_PATH, LIBVIRTRUSTD_UDS_PATH);
     EXPECT_EQ(config->port, LIBVIRTRUSTD_SERVER_PORT);
     EXPECT_EQ(config->sourceCleanupMaxAttempts, 3);
+    EXPECT_EQ(config->rpcRetryMaxAttempts, 3);
+    EXPECT_EQ(config->rpcRetryInitialBackoffMs, 100);
+    EXPECT_EQ(config->rpcRetryMaxBackoffMs, 1000);
 }
 
 // 清理次数明确配置时只接受整数 1–10，避免零次清理或超量重复调用。
@@ -187,6 +196,21 @@ TEST_F(UtilsTest, AcceptsSourceCleanupAttemptBounds)
         const auto config = MakeLinkConfigFromJsonFile(path);
         ASSERT_TRUE(config.has_value());
         EXPECT_EQ(config->sourceCleanupMaxAttempts, expected);
+    }
+}
+
+// 显式重试配置必须在安全范围内，不能将零次、超量或倒置的退避窗口静默改为缺省值。
+TEST_F(UtilsTest, RejectsInvalidRpcRetryConfiguration)
+{
+    for (const char *content : {R"({"rpcRetryMaxAttempts":0})", R"({"rpcRetryMaxAttempts":11})",
+                                R"({"rpcRetryMaxAttempts":-1})", R"({"rpcRetryMaxAttempts":"3"})",
+                                R"({"rpcRetryInitialBackoffMs":0})", R"({"rpcRetryInitialBackoffMs":1001})",
+                                R"({"rpcRetryMaxBackoffMs":0})", R"({"rpcRetryMaxBackoffMs":5001})",
+                                R"({"rpcRetryInitialBackoffMs":500,"rpcRetryMaxBackoffMs":100})"}) {
+        SCOPED_TRACE(content);
+        const auto path = WriteTempConfig("invalid_rpc_retry.json", content);
+        ASSERT_FALSE(path.empty());
+        EXPECT_FALSE(MakeLinkConfigFromJsonFile(path).has_value());
     }
 }
 

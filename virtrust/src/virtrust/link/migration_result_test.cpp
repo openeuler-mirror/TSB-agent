@@ -187,6 +187,21 @@ TEST(MigrationResultTest, FormatsZeroConfirmedStepsWithoutClaimingNoEffect)
     EXPECT_EQ(message.find("NO_EFFECT"), std::string::npos);
 }
 
+TEST(MigrationResultTest, FinalAcknowledgmentUnknownExplainsDestinationMayHaveCommitted)
+{
+    MigrationResult result;
+    result.outcome = MigrationOutcome::Unknown;
+    result.primaryError = {MigrationStage::DestinationCommit, MigrationSide::Source,
+                           MigrationOperation::NotifyPeer, MigrationErrorOrigin::Grpc, false, 0};
+    result.hasPrimaryError = true;
+    result.confirmedSteps = static_cast<uint32_t>(MigrationStep::SourceTsbCommitted);
+
+    const std::string message = FormatMigrationResult(result);
+    EXPECT_NE(message.find("Destination may have committed despite the missing final reply."), std::string::npos);
+    EXPECT_NE(message.find("Do not retry automatically; verify both nodes first."), std::string::npos);
+    EXPECT_EQ(message.find("Destination failed"), std::string::npos);
+}
+
 TEST(MigrationResultTest, FormatsCompensationFailureSeparatelyFromPrimaryCause)
 {
     MigrationResult result;

@@ -4,8 +4,10 @@ set(VIRTRUST_SOURCE_FILES
     ${VIRTRUST_SOURCE_FILES}
     ${PROTO_SRC}
     ${CMAKE_CURRENT_LIST_DIR}/grpc_server.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/migration_attempt_id.cpp
     ${CMAKE_CURRENT_LIST_DIR}/migration_destination_uri.cpp
     ${CMAKE_CURRENT_LIST_DIR}/migration_result.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/migration_replay_cache.cpp
     ${CMAKE_CURRENT_LIST_DIR}/migration_service_impl.cpp
     ${CMAKE_CURRENT_LIST_DIR}/migration_session.cpp)
 
@@ -27,6 +29,7 @@ if(BUILD_TEST)
   target_link_libraries(proto_tools_test PRIVATE virtrust_proto Deps::secure_c)
 endif()
 add_virtrust_test_if(migration_result_test)
+add_virtrust_test_if(migration_replay_cache_test)
 if(BUILD_TEST)
   target_link_libraries(migration_result_test PRIVATE virtrust_proto Deps::secure_c
     absl_raw_logging_internal)
@@ -41,6 +44,11 @@ if(BUILD_TEST AND ENABLE_MOCK_4_FUZZ)
   target_sources(uds_client_result_test PRIVATE grpc_client.cpp)
   target_compile_options(uds_client_result_test PRIVATE -UVIRTRUST_MOCK)
   target_link_libraries(uds_client_result_test PRIVATE grpc++ grpc gpr protobuf Deps::secure_c)
+  # 单独编译真实客户端，使用本机 gRPC 服务验证源端重试，而非模糊测试 mock。
+  add_virtrust_test_if(rpc_client_retry_test)
+  target_sources(rpc_client_retry_test PRIVATE grpc_client.cpp)
+  target_compile_options(rpc_client_retry_test PRIVATE -UVIRTRUST_MOCK)
+  target_link_libraries(rpc_client_retry_test PRIVATE grpc++ grpc gpr protobuf Deps::secure_c)
 endif()
 add_virtrust_test_if(grpc_server_test)
 add_virtrust_test_if(grpc_server_fault_test)

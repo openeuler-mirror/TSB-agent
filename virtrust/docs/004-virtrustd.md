@@ -177,7 +177,10 @@ rpm -e TSB-agent
     "ip": "127.0.0.1",
     "port": 5031,
     "udsPath": "/run/virtrust/rpc.sock",
-    "sourceCleanupMaxAttempts": 3
+    "sourceCleanupMaxAttempts": 3,
+    "rpcRetryMaxAttempts": 3,
+    "rpcRetryInitialBackoffMs": 100,
+    "rpcRetryMaxBackoffMs": 1000
 }
 ```
 
@@ -190,6 +193,9 @@ rpm -e TSB-agent
 - `port`：TCP 监听端口，缺省为 `5031`；修改时还须核对对端配置
 - `udsPath`：可以省略，或显式填写 `/run/virtrust/rpc.sock`；其他值（包括旧 `/tmp/grpc.sock`、空串及非字符串）使配置加载失败，不会静默替换
 - `sourceCleanupMaxAttempts`：迁移目的端确认成功后，源端删除 VRoot 和取消 libvirt 定义各自的最大总尝试次数；缺省为 `3`，显式值只接受整数 `1`–`10`。次数有界不保证单次底层调用有时间上限
+- `rpcRetryMaxAttempts`：源端发起的每个节点间迁移 RPC 网络失败最大总尝试次数（含首次）；缺省 `3`，显式值 `1`–`10`。只重试临时 `UNAVAILABLE`，不重发整次迁移；目的端明确返回“原请求仍在处理”时可在同一阶段总期限内继续查询，不计入此次数
+- `rpcRetryInitialBackoffMs`：首次重试退避毫秒数，缺省 `100`，显式值 `1`–`1000`
+- `rpcRetryMaxBackoffMs`：指数退避的毫秒上限，缺省 `1000`，显式值 `1`–`5000` 且不得小于起始值；实际等待有 ±20% 抖动。信令阶段仍共用 5 秒、传输阶段仍共用 20 秒总期限，重试不叠加期限
 
 字段名区分大小写，使用上面的驼峰名称，不使用 `ca_path` 等下划线名称。缺省证书路径是绝对路径；需要启用 TLS 时，三份证书文件仍须实际存在且可读，也可以显式配置其他可读的绝对路径。仅省略证书字段不会关闭 TLS。
 
@@ -222,6 +228,14 @@ sudo libvirtrustd -d --config /etc/virtrust/config.json
 | `-d` | `--debug`   | 无    | 启用调试模式     |
 | `-h` | `--help`    | 无    | 显示帮助信息     |
 | `-v` | `--version` | 无    | 显示版本信息     |
+
+**迁移最终确认无回复时的人工核查**
+
+CLI 若报告 `outcome=UNKNOWN, stage=DESTINATION_COMMIT, side=SOURCE, operation=NOTIFY_PEER, origin=GRPC`，表示源端没有取得目的端最终业务回复；目的端可能尚未处理，也可能已经成功提交，仅回复丢失。源端此时保留可信资源与虚机定义，不自动清理，也不自动重新发起整次迁移。
+
+管理员应先记录 CLI 输出及源端日志中的 UUID、`attempt`，再核对两端守护进程日志、相同 UUID 的 libvirt 定义和可信资源实际状态；不要仅凭 gRPC 超时或一端的虚机列表推断目的端失败。确认两端资源归属和可信组件状态前，不要手工重发迁移或删除资源。若无法确认，以 `UNKNOWN` 保留现场并按人工故障处置流程处理。当前客户端只在阶段期限内自动重发相同请求；目的端进程内回放缓存不提供期限外只读结果查询，也不跨守护进程重启持久化。
+
+数据传输 RPC 无有效回复时，目的端可能正在导入或已经创建可信资源；源端不自动执行 `UndoMigration`，保留两端现场并报告 `UNKNOWN`。收到明确业务失败后，源端仅在目的端虚机定义的 UUID 与本次迁移一致时才尝试取消定义；UUID 不符或无法读取时保留定义并报告补偿错误。失败通知只结束目的端会话，不撤销已经导入的密文或已创建的 VRoot，不能将通知成功理解为两端资源已恢复。源端 `MigrationNotify(success)` 返回失败时同样不发送反向通知、不自动删除，须核对真实可信组件状态。人工再次执行迁移命令会生成新的尝试 ID，不能复用上一轮缓存结果；必须先确认并处置残留。
 
 ### 系统服务管理
 
