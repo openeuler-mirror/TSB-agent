@@ -21,6 +21,12 @@ service MigrationService {
   //5: 通知迁移结果
   rpc  NotifyVRMigrateResult(MigrateResultRequest) returns (MigrateResultReply) {}
 
+  // 只读取本次守护进程已记录的最终阶段结果，不再次执行迁移。
+  rpc QueryMigrationFinalResult(QueryMigrationFinalResultRequest) returns (QueryMigrationFinalResultReply) {}
+
+  // 本机 root-only UDS 转发人工只读核查，不要求迁移会话仍存在。
+  rpc DomainQueryMigrationFinalResult(QueryMigrationFinalResultRequest) returns (QueryMigrationFinalResultReply) {}
+
   // 6: 迁移请求
   rpc DomainMigrate(DomainMigraterRequest) returns (DomainMigraterReply) {}
 
@@ -32,12 +38,14 @@ message DomainMigraterRequest {
     string destUri = 3;
     string localUri = 4;
     uint32 flags = 5;
+    string attempt_id = 6;
 }
 
 message DomainMigraterReply {
     // 数值业务码供既有控制流判断；诊断描述阶段、确认步骤和补偿失败。
     uint32 result = 1;
     MigrationDiagnostic diagnostic = 2;
+    string attempt_id = 3;
 }
 
 message PrepareMigRequest {
@@ -109,6 +117,25 @@ message MigrateResultRequest {
 
 message MigrateResultReply {
   uint32 result = 1;
+  MigrationDiagnostic diagnostic = 2;
+}
+
+message QueryMigrationFinalResultRequest {
+  string uuid = 1;
+  string attempt_id = 2;
+  // 仅本机 UDS 入口使用，节点间请求不携带此字段。
+  string dest_uri = 3;
+}
+
+enum FinalResultState {
+  FINAL_RESULT_UNKNOWN = 0;
+  FINAL_RESULT_IN_PROGRESS = 1;
+  FINAL_RESULT_COMPLETED_SUCCESS = 2;
+  FINAL_RESULT_COMPLETED_FAILURE = 3;
+}
+
+message QueryMigrationFinalResultReply {
+  FinalResultState state = 1;
   MigrationDiagnostic diagnostic = 2;
 }
 

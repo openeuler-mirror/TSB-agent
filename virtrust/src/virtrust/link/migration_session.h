@@ -59,6 +59,7 @@ public:
         return uuid_;
     }
 
+    // 回放缓存和跨节点消息使用同一身份；不以 UUID 单独识别一次迁移尝试。
     const std::string &AttemptId() const noexcept
     {
         return attemptId_;
@@ -146,6 +147,7 @@ private:
 
     MigrateSessionRc SendTransferOnce(const std::string &cipher, const Description &vmInfo);
 
+    // 最终通知回复丢失时只读查询目的端结果；无法确认时保留未知结论。
     MigrateSessionRc SendFinishedNotify(bool success);
 
     // 辅助函数

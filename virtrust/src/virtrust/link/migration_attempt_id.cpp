@@ -37,4 +37,17 @@ std::string GenerateMigrationAttemptId()
     return result;
 }
 
+bool ValidMigrationAttemptId(const std::string &id) noexcept
+{
+    if (id.size() != 32) {
+        return false;
+    }
+    for (const char value : id) {
+        if (!((value >= '0' && value <= '9') || (value >= 'a' && value <= 'f'))) {
+            return false;
+        }
+    }
+    return true;
+}
+
 } // namespace virtrust

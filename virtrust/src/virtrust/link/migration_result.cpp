@@ -5,6 +5,7 @@
 #include "virtrust/link/migration_result.h"
 
 #include "virtrust/link/proto/migrate.pb.h"
+#include "virtrust/link/migration_attempt_id.h"
 
 namespace virtrust {
 namespace {
@@ -234,6 +235,9 @@ std::string FormatMigrationResult(const MigrationResult &result)
         }
     }
     AppendConfirmedSteps(result.confirmedSteps, message);
+    if (ValidMigrationAttemptId(result.attemptId)) {
+        message += ", attempt_id=" + result.attemptId;
+    }
     message += ".";
     for (size_t i = 0; i < result.compensationErrors.size(); ++i) {
         const auto &error = result.compensationErrors[i];

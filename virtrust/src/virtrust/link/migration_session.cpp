@@ -518,6 +518,28 @@ MigrateSessionRc MigrationSession::SendFinishedNotify(bool success)
     if (ret != 0) {
         if (success) {
             if (ret == RPC_TRANSPORT_FAILURE) {
+                // 最终通知可能已完成：只读核查使用独立期限，不重新执行目的端业务。
+                protos::QueryMigrationFinalResultRequest query;
+                query.set_uuid(uuid_);
+                query.set_attempt_id(attemptId_);
+                protos::QueryMigrationFinalResultReply checked;
+                // 先将查询结果预设为传输失败
+                int32_t queryRc = RPC_TRANSPORT_FAILURE;
+                try {
+                    queryRc = rpcClient_->QueryMigrationFinalResult(RPC_SIGNAL_TIMEOUT, query, &checked);
+                } catch (...) {
+                    // 查询本身异常不改变原通知结果未知的保守结论。
+                }
+                if (queryRc == 0 && checked.state() == protos::FINAL_RESULT_COMPLETED_SUCCESS) {
+                    VIRTRUST_LOG_WARN("Final migration reply lost but read-only query confirmed destination: "
+                                      "uuid={}, attempt={}", uuid_, attemptId_);
+                    return MigrateSessionRc::OK;
+                }
+                if (queryRc == 0 && checked.state() == protos::FINAL_RESULT_COMPLETED_FAILURE) {
+                    RecordPeerFailure(checked.diagnostic(), VirtrustRc::ERROR, MigrationStage::DestinationCommit,
+                                      MigrationOperation::NotifyTsb);
+                    return MigrateSessionRc::ERROR;
+                }
                 RecordFailure(MigrationStage::DestinationCommit, MigrationSide::Source,
                               MigrationOperation::NotifyPeer, MigrationErrorOrigin::Grpc);
                 // 未取得回复不等于目的端未提交；日志保留尝试身份，供两端人工核查。

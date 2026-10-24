@@ -21,6 +21,7 @@
 #include "virtrust/dllib/libvirt.h"
 #include "virtrust/link/migration_service_impl.h"
 #include "virtrust/link/migration_destination_uri.h"
+#include "virtrust/link/migration_attempt_id.h"
 #include "virtrust/link/migration_session.h"
 
 namespace virtrust {
@@ -108,6 +109,7 @@ protected:
         request_.set_desturi("qemu+tls://192.168.1.100/system");
         request_.set_localuri("qemu:///system");
         request_.set_flags(VIR_MIGRATE_OFFLINE | VIR_MIGRATE_PERSIST_DEST | MIGRATE_UNDEFINE_SOURCE);
+        request_.set_attempt_id("0123456789abcdef0123456789abcdef");
     }
 
     void TearDown() override
@@ -166,6 +168,8 @@ TEST_F(SourceMigrationAdmissionTest, OrdinaryHolderReturnsBusyBeforeCreatingSess
     ScopedSourceConnectFailure failIfQueriedBeforeAdmission;
     const auto reply = MigrateReply();
     EXPECT_EQ(reply.result(), static_cast<uint32_t>(VirtrustRc::BUSY));
+    // 准入拒绝发生在会话创建前，仍须回传本次请求身份供 UDS 客户端匹配。
+    EXPECT_EQ(reply.attempt_id(), request_.attempt_id());
     ASSERT_TRUE(reply.has_diagnostic());
     EXPECT_EQ(reply.diagnostic().outcome(), protos::MIGRATION_OUTCOME_FAILED_BEFORE_EFFECT);
     EXPECT_EQ(reply.diagnostic().primary_error().stage(), protos::MIGRATION_STAGE_PREFLIGHT);
@@ -304,6 +308,16 @@ TEST_F(SourceMigrationAdmissionTest, RejectsDestinationWithMalformedPort)
     EXPECT_EQ(State().startCalls, 0);
 }
 
+TEST_F(SourceMigrationAdmissionTest, RejectsMalformedCallerAttemptBeforeSession)
+{
+    request_.set_attempt_id("invalid\nidentity");
+    const auto reply = MigrateReply();
+    EXPECT_EQ(reply.result(), static_cast<uint32_t>(VirtrustRc::ERROR));
+    EXPECT_TRUE(reply.attempt_id().empty());
+    EXPECT_EQ(State().startCalls, 0);
+    EXPECT_EQ(SessionManager::GetInstance().GetSession(UUID), nullptr);
+}
+
 // 非法标志必须在取得节点资格和访问 libvirt 之前被本机 UDS 入口拒绝。
 TEST_F(SourceMigrationAdmissionTest, RejectsUnsupportedFlagsBeforeAdmissionAndLibvirt)
 {
@@ -317,6 +331,7 @@ TEST_F(SourceMigrationAdmissionTest, RejectsUnsupportedFlagsBeforeAdmissionAndLi
         ScopedSourceConnectFailure failIfOpened;
         const auto reply = MigrateReply();
         EXPECT_EQ(reply.result(), static_cast<uint32_t>(VirtrustRc::ERROR));
+        EXPECT_EQ(reply.attempt_id(), request_.attempt_id());
         ASSERT_TRUE(reply.has_diagnostic());
         EXPECT_EQ(reply.diagnostic().outcome(), protos::MIGRATION_OUTCOME_FAILED_BEFORE_EFFECT);
         EXPECT_EQ(reply.diagnostic().primary_error().stage(), protos::MIGRATION_STAGE_PREFLIGHT);
@@ -453,6 +468,8 @@ TEST_F(SourceMigrationAdmissionTest, SuccessfulSourceSessionDiagnosticSurvivesUd
     State().useRealStart = true;
     const auto reply = MigrateReply();
     EXPECT_EQ(reply.result(), static_cast<uint32_t>(VirtrustRc::OK));
+    EXPECT_TRUE(ValidMigrationAttemptId(reply.attempt_id()));
+    EXPECT_EQ(reply.attempt_id(), request_.attempt_id());
     ASSERT_TRUE(reply.has_diagnostic());
     EXPECT_EQ(reply.diagnostic().outcome(), protos::MIGRATION_OUTCOME_SUCCESS);
     EXPECT_FALSE(reply.diagnostic().has_primary_error());
@@ -474,7 +491,9 @@ TEST_F(SourceMigrationAdmissionTest, LocalSessionUriCanMigrateUnderExclusiveAdmi
 TEST_F(SourceMigrationAdmissionTest, StartFailureReleasesAdmissionAndSession)
 {
     State().startResult = MigrateSessionRc::ERROR;
-    EXPECT_EQ(Migrate(), static_cast<uint32_t>(VirtrustRc::ERROR));
+    const auto reply = MigrateReply();
+    EXPECT_EQ(reply.result(), static_cast<uint32_t>(VirtrustRc::ERROR));
+    EXPECT_TRUE(ValidMigrationAttemptId(reply.attempt_id()));
     EXPECT_TRUE(State().cleanupSawExclusive);
     EXPECT_EQ(SessionManager::GetInstance().GetSession(UUID), nullptr);
     NodeAdmission ordinary;

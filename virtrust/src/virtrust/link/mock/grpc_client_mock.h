@@ -34,6 +34,9 @@ public:
     // Mock DomainMigrate function - migration entry point
     MigrationResult DomainMigrate(const MigrationConfig &config);
 
+    MigrationFinalQueryResult QueryMigrationFinalResult(const std::string &uuid, const std::string &destUri,
+                                                       const std::string &attemptId);
+
 private:
     LinkConfig config_;
 };
@@ -69,6 +72,13 @@ public:
     // 5: Notify migration result
     int32_t NotifyVRMigrateResult(uint32_t timeout, const protos::MigrateResultRequest &request,
                                   protos::MigrateResultReply *response);
+
+    int32_t QueryMigrationFinalResult(uint32_t timeout, const protos::QueryMigrationFinalResultRequest &request,
+                                      protos::QueryMigrationFinalResultReply *response);
+
+    // 与真实客户端一致，人工查询保留单次取得的 IN_PROGRESS 状态。
+    int32_t QueryMigrationFinalResultOnce(uint32_t timeout, const protos::QueryMigrationFinalResultRequest &request,
+                                          protos::QueryMigrationFinalResultReply *response);
 
 private:
     LinkConfig config_;

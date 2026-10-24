@@ -9,19 +9,25 @@
 #include <algorithm>
 #include <chrono>
 #include <memory>
+#include <optional>
 #include <random>
 #include <string>
 #include <thread>
+#include <utility>
 
 #include "virtrust/base/str_utils.h"
 #include "virtrust/link/defines.h"
+#include "virtrust/link/migration_attempt_id.h"
 
 namespace virtrust {
 namespace {
 // 当前 UDS 调用没有可信业务回复时，结果只能是未知且需要人工核查。
-MigrationResult UnknownUdsFailure(MigrationErrorOrigin origin)
+MigrationResult UnknownUdsFailure(MigrationErrorOrigin origin, const std::string &attemptId = {})
 {
     MigrationResult result;
+    if (ValidMigrationAttemptId(attemptId)) {
+        result.attemptId = attemptId;
+    }
     result.primaryError = {MigrationStage::Uds, MigrationSide::Source, MigrationOperation::NotifyPeer,
                            origin, false, 0};
     result.hasPrimaryError = true;
@@ -42,10 +48,10 @@ bool IsKnownBusinessResult(uint32_t value)
     }
 }
 
-// 五个节点间 RPC 共用同一策略；总期限覆盖所有调用和退避，而不是每次重试重新计时。
-template <typename Reply, typename Call>
+// 节点间 RPC 共用同一期限策略；总期限覆盖所有调用和退避，而不是每次重试重新计时。
+template <typename Reply, typename Call, typename Result>
 int32_t InvokePeerWithRetry(const LinkConfig &config, uint32_t timeout, const char *operation,
-                            Reply *response, Call &&call)
+                            Reply *response, Call &&call, Result &&result)
 {
     if (response == nullptr || timeout == 0) {
         VIRTRUST_LOG_ERROR("{}: invalid reply or zero timeout", operation);
@@ -77,7 +83,8 @@ int32_t InvokePeerWithRetry(const LinkConfig &config, uint32_t timeout, const ch
     const auto maxBackoff = std::clamp<uint16_t>(config.rpcRetryMaxBackoffMs, initialBackoff,
                                                MAX_RPC_RETRY_MAX_BACKOFF_MS);
     uint32_t nextBackoff = initialBackoff;
-    // networkFailures 只计一般 UNAVAILABLE；requestCount 包括“原请求仍在处理”的查询。
+    // networkFailures 只计一般 UNAVAILABLE；目的端明确“处理中”不消耗重试次数。
+    // requestCount 计实际发送次数，供期限耗尽和失败日志定位。
     uint16_t networkFailures = 0;
     uint32_t requestCount = 0;
     while (true) {
@@ -92,14 +99,18 @@ int32_t InvokePeerWithRetry(const LinkConfig &config, uint32_t timeout, const ch
         response->Clear();
         ++requestCount;
         const grpc::Status status = call(*stub, context, response);
-        if (status.ok()) {
-            return response->result();
+        // 只有收到成功的 gRPC 回复才提取业务值；空值表示最终结果仍在处理中。
+        const auto value = status.ok() ? result(*response) : std::optional<int32_t>{};
+        if (status.ok() && value.has_value()) {
+            return *value;
         }
         // 目的端已明确确认原请求仍在执行：仅在阶段总期限内轮询，不耗尽网络失败的次数配额。
-        const bool inProgress = status.error_code() == grpc::StatusCode::UNAVAILABLE &&
-                                status.error_details() == MIGRATION_STEP_IN_PROGRESS_DETAIL;
+        // 普通 UNAVAILABLE 没有专用 details，按网络失败计数，不能无限重发。
+        const bool inProgress = (status.ok() && !value.has_value()) ||
+                                (status.error_code() == grpc::StatusCode::UNAVAILABLE &&
+                                 status.error_details() == MIGRATION_STEP_IN_PROGRESS_DETAIL);
         // 业务失败、协议冲突或不可回放均不是本阶段可自动修复的网络抖动。
-        if (status.error_code() != grpc::StatusCode::UNAVAILABLE ||
+        if ((!status.ok() && status.error_code() != grpc::StatusCode::UNAVAILABLE) ||
             (!inProgress && ++networkFailures >= attempts)) {
             VIRTRUST_LOG_ERROR("{}: gRPC failed after {} request(s), code={}, detail={}", operation, requestCount,
                                static_cast<int>(status.error_code()), status.error_message());
@@ -123,10 +134,52 @@ int32_t InvokePeerWithRetry(const LinkConfig &config, uint32_t timeout, const ch
     }
     return RPC_TRANSPORT_FAILURE;
 }
+
+template <typename Reply, typename Call>
+int32_t InvokePeerWithRetry(const LinkConfig &config, uint32_t timeout, const char *operation,
+                            Reply *response, Call &&call)
+{
+    return InvokePeerWithRetry(config, timeout, operation, response, std::forward<Call>(call),
+                               [](const Reply &reply) -> std::optional<int32_t> { return reply.result(); });
+}
 } // namespace
 
 UdsClient::UdsClient(LinkConfig config) : config_(config)
 {}
+
+MigrationFinalQueryResult UdsClient::QueryMigrationFinalResult(const std::string &uuid,
+                                                               const std::string &destUri,
+                                                               const std::string &attemptId)
+{
+    protos::QueryMigrationFinalResultRequest request;
+    request.set_uuid(uuid);
+    request.set_attempt_id(attemptId);
+    request.set_dest_uri(destUri);
+    protos::QueryMigrationFinalResultReply reply;
+    grpc::ClientContext context;
+    // 本机转发可额外使用五秒节点查询预算；为 UDS 调用留出少量调度余量。
+    context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(7));
+    const auto channel = grpc::CreateChannel("unix:" + config_.udsPath, grpc::InsecureChannelCredentials());
+    auto stub = protos::MigrationService::NewStub(channel);
+    if (stub == nullptr || !stub->DomainQueryMigrationFinalResult(&context, request, &reply).ok()) {
+        return {};
+    }
+    MigrationFinalQueryResult result;
+    switch (reply.state()) {
+        case protos::FINAL_RESULT_IN_PROGRESS: result.state = MigrationFinalState::InProgress; break;
+        case protos::FINAL_RESULT_COMPLETED_SUCCESS: result.state = MigrationFinalState::CompletedSuccess; break;
+        case protos::FINAL_RESULT_COMPLETED_FAILURE:
+            result.state = MigrationFinalState::CompletedFailure;
+            if (reply.has_diagnostic()) {
+                result.diagnostic = FromProto(reply.diagnostic(), VirtrustRc::ERROR);
+                result.hasDiagnostic = true;
+            }
+            break;
+        case protos::FINAL_RESULT_UNKNOWN:
+        default: break;
+    }
+    return result;
+}
 
 MigrationResult UdsClient::DomainMigrate(const MigrationConfig &config)
 {
@@ -137,6 +190,7 @@ MigrationResult UdsClient::DomainMigrate(const MigrationConfig &config)
     request.set_desturi(config.destUri);
     request.set_localuri(config.localUri);
     request.set_flags(config.flags);
+    request.set_attempt_id(config.attemptId);
     // 业务回复只有在 gRPC 状态成功且诊断存在时才可采信。
     protos::DomainMigraterReply reply;
 
@@ -150,7 +204,7 @@ MigrationResult UdsClient::DomainMigrate(const MigrationConfig &config)
     std::unique_ptr<protos::MigrationService::Stub> stub = protos::MigrationService::NewStub(channel);
     if (stub == nullptr) {
         VIRTRUST_LOG_ERROR("|DomainMigrate|END|returnF|new stub failed");
-        return UnknownUdsFailure(MigrationErrorOrigin::Internal);
+        return UnknownUdsFailure(MigrationErrorOrigin::Internal, config.attemptId);
     }
     grpc::Status status = stub->DomainMigrate(&context, request, &reply);
 
@@ -158,16 +212,24 @@ MigrationResult UdsClient::DomainMigrate(const MigrationConfig &config)
         VIRTRUST_LOG_ERROR("|DomainMigrate|END|returnF|fail to triggle DomainMigrate:{}, serverAddress is: {}",
                            status.error_message(), config_.udsPath);
         // UDS 未取得有效业务回复，不允许读取 reply 的默认成功值。
-        return UnknownUdsFailure(MigrationErrorOrigin::Grpc);
+        return UnknownUdsFailure(MigrationErrorOrigin::Grpc, config.attemptId);
     }
     if (!reply.has_diagnostic()) {
         // 所有节点均应使用当前协议；缺少诊断的空成功回复不能被采信。
-        return UnknownUdsFailure(MigrationErrorOrigin::Internal);
+        return UnknownUdsFailure(MigrationErrorOrigin::Internal, config.attemptId);
     }
     // result 是兼容现有业务分支的数值码，diagnostic 承载阶段与副作用证据。
     const bool knownBusinessResult = IsKnownBusinessResult(reply.result());
     auto result = FromProto(reply.diagnostic(), knownBusinessResult ? static_cast<VirtrustRc>(reply.result())
                                                                  : VirtrustRc::ERROR);
+    // UDS 回复也按生成规则过滤，避免控制字符进入 CLI 诊断。
+    if (ValidMigrationAttemptId(reply.attempt_id())) {
+        result.attemptId = reply.attempt_id();
+    }
+    if (ValidMigrationAttemptId(config.attemptId) && result.attemptId != config.attemptId) {
+        // 业务回复必须与本次调用的身份一致；不可信回复按结果未知处理。
+        return UnknownUdsFailure(MigrationErrorOrigin::Internal, config.attemptId);
+    }
     // Busy 只能表示准入前拒绝；数值码和诊断互相矛盾时，不能压掉可能已发生的副作用。
     const bool contradictoryBusy = result.rc == VirtrustRc::BUSY &&
         (result.outcome != MigrationOutcome::FailedBeforeEffect || result.manualCheckRequired ||
@@ -238,6 +300,36 @@ int32_t RpcClient::NotifyVRMigrateResult(uint32_t timeout, const protos::Migrate
     return InvokePeerWithRetry(config_, timeout, "NotifyVRMigrateResult", response,
                                [&](auto &stub, auto &context, auto *reply) {
                                    return stub.NotifyVRMigrateResult(&context, request, reply);
+                               });
+}
+
+int32_t RpcClient::QueryMigrationFinalResult(uint32_t timeout, const protos::QueryMigrationFinalResultRequest &request,
+                                             protos::QueryMigrationFinalResultReply *response)
+{
+    // 查询复用阶段总期限和退避；IN_PROGRESS 转为空业务值，使包装层在期限内继续轮询。
+    return InvokePeerWithRetry(config_, timeout, "QueryMigrationFinalResult", response,
+                               [&](auto &stub, auto &context, auto *reply) {
+                                   return stub.QueryMigrationFinalResult(&context, request, reply);
+                               },
+                               [](const protos::QueryMigrationFinalResultReply &reply) -> std::optional<int32_t> {
+                                   if (reply.state() == protos::FINAL_RESULT_IN_PROGRESS) {
+                                       return std::nullopt;
+                                   }
+                                   return 0;
+                               });
+}
+
+int32_t RpcClient::QueryMigrationFinalResultOnce(uint32_t timeout,
+                                                 const protos::QueryMigrationFinalResultRequest &request,
+                                                 protos::QueryMigrationFinalResultReply *response)
+{
+    // 已取得 gRPC 成功回复时立即返回其原始状态；一般网络失败仍受同一总期限和重试次数约束。
+    return InvokePeerWithRetry(config_, timeout, "QueryMigrationFinalResultOnce", response,
+                               [&](auto &stub, auto &context, auto *reply) {
+                                   return stub.QueryMigrationFinalResult(&context, request, reply);
+                               },
+                               [](const protos::QueryMigrationFinalResultReply &) -> std::optional<int32_t> {
+                                   return 0;
                                });
 }
 }; // namespace virtrust

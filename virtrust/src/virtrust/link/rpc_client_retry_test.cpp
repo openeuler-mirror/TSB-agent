@@ -6,11 +6,13 @@
 #include <grpcpp/grpcpp.h>
 
 #include <atomic>
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <memory>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "virtrust/link/grpc_client.h"
 
@@ -30,6 +32,8 @@ public:
     std::atomic<int> startCalls{0};
     std::atomic<int> transferCalls{0};
     std::atomic<int> finishCalls{0};
+    std::atomic<int> queryCalls{0};
+    std::vector<protos::FinalResultState> queryStates;
     std::array<std::string, 2> exchangeRequests;
     std::array<std::string, 2> startRequests;
     std::array<std::string, 2> transferRequests;
@@ -99,6 +103,17 @@ public:
     {
         return ReplyAfterTransient(finishCalls, finishRequests, request, response);
     }
+
+    grpc::Status QueryMigrationFinalResult(grpc::ServerContext *,
+                                           const protos::QueryMigrationFinalResultRequest *request,
+                                           protos::QueryMigrationFinalResultReply *response) override
+    {
+        EXPECT_EQ(request->uuid(), "12345678-1234-1234-1234-123456789001");
+        EXPECT_EQ(request->attempt_id(), "0123456789abcdef0123456789abcdef");
+        const auto index = static_cast<size_t>(queryCalls++);
+        response->set_state(queryStates.at(std::min(index, queryStates.size() - 1)));
+        return grpc::Status::OK;
+    }
 };
 
 class RpcClientRetryTest : public ::testing::Test {
@@ -133,6 +148,14 @@ protected:
         request.set_uuid("12345678-1234-1234-1234-123456789001");
         request.set_attempt_id("0123456789abcdef0123456789abcdef");
         request.set_domainname("retry-test");
+        return request;
+    }
+
+    protos::QueryMigrationFinalResultRequest QueryRequest() const
+    {
+        protos::QueryMigrationFinalResultRequest request;
+        request.set_uuid("12345678-1234-1234-1234-123456789001");
+        request.set_attempt_id("0123456789abcdef0123456789abcdef");
         return request;
     }
 
@@ -250,6 +273,40 @@ TEST_F(RpcClientRetryTest, StageDeadlineIsNotMultipliedByAttemptCount)
     const auto elapsed = std::chrono::steady_clock::now() - begin;
     EXPECT_LT(elapsed, std::chrono::milliseconds(1600));
     EXPECT_EQ(service_.calls, 1);
+}
+
+TEST_F(RpcClientRetryTest, ReadOnlyFinalQueryPollsInProgressWithoutResendingNotification)
+{
+    service_.queryStates = {protos::FINAL_RESULT_IN_PROGRESS, protos::FINAL_RESULT_COMPLETED_SUCCESS};
+    RpcClient client(config_);
+    protos::QueryMigrationFinalResultReply reply;
+    EXPECT_EQ(client.QueryMigrationFinalResult(2, QueryRequest(), &reply), 0);
+    EXPECT_EQ(reply.state(), protos::FINAL_RESULT_COMPLETED_SUCCESS);
+    EXPECT_EQ(service_.queryCalls, 2);
+    EXPECT_EQ(service_.finishCalls, 0);
+}
+
+TEST_F(RpcClientRetryTest, ManualFinalQueryReturnsInProgressWithoutPolling)
+{
+    service_.queryStates = {protos::FINAL_RESULT_IN_PROGRESS, protos::FINAL_RESULT_COMPLETED_SUCCESS};
+    RpcClient client(config_);
+    protos::QueryMigrationFinalResultReply reply;
+    EXPECT_EQ(client.QueryMigrationFinalResultOnce(2, QueryRequest(), &reply), 0);
+    EXPECT_EQ(reply.state(), protos::FINAL_RESULT_IN_PROGRESS);
+    EXPECT_EQ(service_.queryCalls, 1);
+    EXPECT_EQ(service_.finishCalls, 0);
+}
+
+TEST_F(RpcClientRetryTest, ReadOnlyFinalQueryStopsAtOneTotalDeadline)
+{
+    service_.queryStates = {protos::FINAL_RESULT_IN_PROGRESS};
+    RpcClient client(config_);
+    protos::QueryMigrationFinalResultReply reply;
+    const auto begin = std::chrono::steady_clock::now();
+    EXPECT_EQ(client.QueryMigrationFinalResult(1, QueryRequest(), &reply), RPC_TRANSPORT_FAILURE);
+    EXPECT_LT(std::chrono::steady_clock::now() - begin, std::chrono::milliseconds(1600));
+    EXPECT_GT(service_.queryCalls, 1);
+    EXPECT_EQ(service_.finishCalls, 0);
 }
 
 } // namespace

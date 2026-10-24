@@ -15,6 +15,17 @@
 namespace virtrust {
 namespace {
 
+TEST(MigrationResultTest, UnknownResultPrintsValidatedAttemptIdForManualQuery)
+{
+    MigrationResult result;
+    result.attemptId = "0123456789abcdef0123456789abcdef";
+    EXPECT_NE(FormatMigrationResult(result).find("attempt_id=0123456789abcdef0123456789abcdef"),
+              std::string::npos);
+
+    result.attemptId = "untrusted\ntext";
+    EXPECT_EQ(FormatMigrationResult(result).find("untrusted"), std::string::npos);
+}
+
 TEST(MigrationResultTest, PreservesPartialResultAcrossProtoRoundTrip)
 {
     MigrationResult original;

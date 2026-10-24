@@ -106,5 +106,47 @@ TEST(MigrationReplayCacheTest, CompletedStageRemainsReplayableWhileAttemptIsActi
               MigrationReplayCache::Decision::Execute);
 }
 
+TEST(MigrationReplayCacheTest, FinalQueryDistinguishesInProgressSuccessAndWrongIdentity)
+{
+    using Cache = MigrationReplayCache;
+    const auto now = Cache::Clock::now();
+    Cache cache;
+    auto admission = cache.Begin("attempt-1", Cache::Step::Finish, "request", now, "uuid-1");
+    ASSERT_EQ(admission.decision, Cache::Decision::Execute);
+    EXPECT_EQ(cache.QueryFinal("uuid-1", "attempt-1", now).state, Cache::FinalState::InProgress);
+    EXPECT_EQ(cache.QueryFinal("uuid-2", "attempt-1", now).state, Cache::FinalState::Unknown);
+
+    ASSERT_TRUE(cache.Complete(admission, "reply", now, true));
+    const auto result = cache.QueryFinal("uuid-1", "attempt-1", now);
+    EXPECT_EQ(result.state, Cache::FinalState::CompletedSuccess);
+    EXPECT_EQ(result.reply, "reply");
+}
+
+TEST(MigrationReplayCacheTest, FinalQueryKeepsExplicitFailureButNotUnreplayableResult)
+{
+    using Cache = MigrationReplayCache;
+    const auto now = Cache::Clock::now();
+    Cache cache(2, 128, std::chrono::seconds(10));
+    auto failed = cache.Begin("attempt-1", Cache::Step::Finish, "request", now, "uuid-1");
+    ASSERT_TRUE(cache.Complete(failed, "failure-reply", now, false));
+    EXPECT_EQ(cache.QueryFinal("uuid-1", "attempt-1", now).state, Cache::FinalState::CompletedFailure);
+
+    auto unknown = cache.Begin("attempt-2", Cache::Step::Finish, "request", now, "uuid-1");
+    cache.CompleteUnreplayable(unknown, now);
+    EXPECT_EQ(cache.QueryFinal("uuid-1", "attempt-2", now).state, Cache::FinalState::Unknown);
+    EXPECT_EQ(cache.QueryFinal("uuid-1", "attempt-1", now + std::chrono::seconds(11)).state,
+              Cache::FinalState::Unknown);
+}
+
+TEST(MigrationReplayCacheTest, FinalQueryNeverTreatsMissingOutcomeAsSuccess)
+{
+    using Cache = MigrationReplayCache;
+    const auto now = Cache::Clock::now();
+    Cache cache;
+    auto admission = cache.Begin("attempt-1", Cache::Step::Finish, "request", now, "uuid-1");
+    ASSERT_TRUE(cache.Complete(admission, "default-zero-reply", now));
+    EXPECT_EQ(cache.QueryFinal("uuid-1", "attempt-1", now).state, Cache::FinalState::Unknown);
+}
+
 } // namespace
 } // namespace virtrust
