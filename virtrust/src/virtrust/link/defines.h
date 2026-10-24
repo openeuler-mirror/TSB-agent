@@ -81,6 +81,7 @@ struct MigrationConfig {
     std::string destUri;
     std::string localUri;
     unsigned int flags;
+    std::string attemptId;
 };
 
 } // namespace virtrust

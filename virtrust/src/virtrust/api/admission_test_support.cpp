@@ -28,11 +28,23 @@
 #include "virtrust/api/context.h"
 #include "virtrust/link/grpc_client.h"
 
+namespace {
+void *failedGetVRootsOutput = nullptr;
+bool failedGetVRootsOutputFreed = false;
+}
+
 namespace virtrust::test {
 AdmissionTestState &AdmissionState()
 {
     static AdmissionTestState state;
     return state;
+}
+
+bool WasFailedGetVRootsOutputFreed() { return failedGetVRootsOutputFreed; }
+void ResetFailedGetVRootsOutputTracking()
+{
+    failedGetVRootsOutput = nullptr;
+    failedGetVRootsOutputFreed = false;
 }
 
 TestFd::~TestFd() { Reset(); }
@@ -302,6 +314,15 @@ extern "C" int __wrap_GetVRoots(int *count, Description **info)
         EXPECT_EQ(state.observedConnection->GetUri(), state.expectedUriBeforePreparation);
     }
     ++state.businessCalls;
+    if (state.allocatedGetVRootsFailure != 0) {
+        *info = static_cast<Description *>(malloc(sizeof(Description)));
+        if (*info == nullptr) {
+            return -1;
+        }
+        failedGetVRootsOutput = *info;
+        *count = state.allocatedGetVRootsFailure == 1 ? 1 : -1;
+        return state.allocatedGetVRootsFailure == 1 ? -71 : 0;
+    }
     if (state.malformedGetVRoots != 0) {
         *count = state.malformedGetVRoots == 1 ? -1 : 1;
         *info = nullptr;
@@ -311,6 +332,15 @@ extern "C" int __wrap_GetVRoots(int *count, Description **info)
         return state.getVRootsOverride;
     }
     return __real_GetVRoots(count, info);
+}
+extern "C" void __real_free(void *);
+extern "C" void __wrap_free(void *pointer)
+{
+    if (pointer != nullptr && pointer == failedGetVRootsOutput) {
+        failedGetVRootsOutputFreed = true;
+        failedGetVRootsOutput = nullptr;
+    }
+    __real_free(pointer);
 }
 extern "C" int __real_StartVRoot(char *);
 extern "C" int __wrap_StartVRoot(char *uuid)

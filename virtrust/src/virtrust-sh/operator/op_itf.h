@@ -27,6 +27,7 @@ enum class OpTy : uint32_t {
     CREATE,
     DESTROY,
     MIGRATE,
+    MIGRATION_RESULT,
     START,
     UNDEFINE,
     LIST,

@@ -29,6 +29,9 @@ public:
 
     MigrationResult DomainMigrate(const MigrationConfig &config);
 
+    MigrationFinalQueryResult QueryMigrationFinalResult(const std::string &uuid, const std::string &destUri,
+                                                       const std::string &attemptId);
+
 private:
     LinkConfig config_;
 };
@@ -55,6 +58,14 @@ public:
     // 5: 通知迁移结果
     int32_t NotifyVRMigrateResult(uint32_t timeout, const protos::MigrateResultRequest &request,
                                   protos::MigrateResultReply *response);
+
+    // 自动核查会在同一总期限内轮询 IN_PROGRESS；返回 -1 表示未取得最终可信回复。
+    int32_t QueryMigrationFinalResult(uint32_t timeout, const protos::QueryMigrationFinalResultRequest &request,
+                                      protos::QueryMigrationFinalResultReply *response);
+
+    // 人工查询只读取一次目的端状态；IN_PROGRESS 直接交给调用方展示。
+    int32_t QueryMigrationFinalResultOnce(uint32_t timeout, const protos::QueryMigrationFinalResultRequest &request,
+                                          protos::QueryMigrationFinalResultReply *response);
 
 private:
     LinkConfig config_;

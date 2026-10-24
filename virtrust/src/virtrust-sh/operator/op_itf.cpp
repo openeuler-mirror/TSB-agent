@@ -10,6 +10,7 @@
 #include "virtrust-sh/operator/op_destroy.h"
 #include "virtrust-sh/operator/op_list.h"
 #include "virtrust-sh/operator/op_migrate.h"
+#include "virtrust-sh/operator/op_migration_result.h"
 #include "virtrust-sh/operator/op_start.h"
 #include "virtrust-sh/operator/op_undefine.h"
 
@@ -24,6 +25,8 @@ std::unique_ptr<OpItf> MakeOperator(OpTy type)
             return std::make_unique<OpDestroy>();
         case OpTy::MIGRATE:
             return std::make_unique<OpMigrate>();
+        case OpTy::MIGRATION_RESULT:
+            return std::make_unique<OpMigrationResult>();
         case OpTy::START:
             return std::make_unique<OpStart>();
         case OpTy::UNDEFINE:
@@ -43,6 +46,8 @@ OpTy OpTyFromStr(const std::string &type)
         return OpTy::DESTROY;
     } else if (type == "migrate") {
         return OpTy::MIGRATE;
+    } else if (type == "migration-result") {
+        return OpTy::MIGRATION_RESULT;
     } else if (type == "start") {
         return OpTy::START;
     } else if (type == "undefine") {

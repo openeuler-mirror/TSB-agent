@@ -216,6 +216,27 @@ TEST(DomainMigrationAdmissionTest, TsbListFailureKeepsPreflightOriginAndRawCode)
     state.getVRootsOverride = 0;
 }
 
+TEST(DomainMigrationAdmissionTest, FreesAllocatedTsbOutputOnPreflightFailure)
+{
+    auto conn = std::make_unique<ConnCtx>();
+    ASSERT_TRUE(conn->Connect());
+    auto &state = test::AdmissionState();
+    for (const int failureMode : {1, 2}) {
+        SCOPED_TRACE(failureMode);
+        test::ResetFailedGetVRootsOutputTracking();
+        state.allocatedGetVRootsFailure = failureMode;
+        state.udsCalls = 0;
+        const auto result = DomainMigrate(conn, "test-domain-2", "qemu+tls://192.168.1.100/system",
+                                          MIGRATE_UNDEFINE_SOURCE);
+        EXPECT_EQ(result.outcome, MigrationOutcome::FailedBeforeEffect);
+        EXPECT_EQ(result.primaryError.origin, failureMode == 1 ? MigrationErrorOrigin::Tsb
+                                                               : MigrationErrorOrigin::Internal);
+        EXPECT_TRUE(test::WasFailedGetVRootsOutputFreed());
+        EXPECT_EQ(state.udsCalls, 0);
+        state.allocatedGetVRootsFailure = 0;
+    }
+}
+
 TEST(DomainMigrationAdmissionTest, MalformedSuccessfulTsbOutputIsInternalWithoutRawCode)
 {
     auto conn = std::make_unique<ConnCtx>();

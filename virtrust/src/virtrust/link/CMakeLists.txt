@@ -90,6 +90,8 @@ if(BUILD_TEST AND ENABLE_MOCK_4_FUZZ)
     "LINKER:--wrap=_ZN8virtrust13RpcClientMock19ExchangePkAndReportEjRKNS_6protos26EXchangePkAndReportRequestEPNS1_24EXchangePkAndReportReplyE"
     "LINKER:--wrap=_ZN8virtrust13RpcClientMock14StartMigrationEjRKNS_6protos15StartMigRequestEPNS1_13StartMigReplyE"
     "LINKER:--wrap=_ZN8virtrust13RpcClientMock21NotifyVRMigrateResultEjRKNS_6protos20MigrateResultRequestEPNS1_18MigrateResultReplyE"
+    "LINKER:--wrap=_ZN8virtrust13RpcClientMock25QueryMigrationFinalResultEjRKNS_6protos32QueryMigrationFinalResultRequestEPNS1_30QueryMigrationFinalResultReplyE"
+    "LINKER:--wrap=_ZN8virtrust13RpcClientMock29QueryMigrationFinalResultOnceEjRKNS_6protos32QueryMigrationFinalResultRequestEPNS1_30QueryMigrationFinalResultReplyE"
     "LINKER:--wrap=_ZN8virtrust13RpcClientMock16SendVRsourceDataEjRKNS_6protos19VRsourceInfoRequestEPNS1_17VRsourceInfoReplyE"
     "LINKER:--wrap=MigrationImportVrootCipher"
     "LINKER:--wrap=CreateVRoot"

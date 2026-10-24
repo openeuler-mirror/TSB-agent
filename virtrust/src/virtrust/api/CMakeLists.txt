@@ -20,7 +20,7 @@ if(BUILD_TEST AND ENABLE_MOCK_4_FUZZ)
   set(VIRTRUST_ADMISSION_TEST_WRAP_OPTIONS
     "LINKER:--wrap=_ZN8virtrust13NodeAdmission10TryAcquireENS_13AdmissionKindERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEEj"
     "LINKER:--wrap=_ZN8virtrust13UdsClientMock13DomainMigrateERKNS_15MigrationConfigE"
-    "LINKER:--wrap=open" "LINKER:--wrap=GetVRoots" "LINKER:--wrap=StartVRoot"
+    "LINKER:--wrap=open" "LINKER:--wrap=GetVRoots" "LINKER:--wrap=free" "LINKER:--wrap=StartVRoot"
     "LINKER:--wrap=StopVRoot" "LINKER:--wrap=RemoveVRoot" CACHE INTERNAL "Task 4 test wrappers")
   foreach(test_name domain_test domain_admission_test)
     target_link_libraries(${test_name} PRIVATE domain-admission-test-obj)

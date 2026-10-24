@@ -69,6 +69,9 @@ struct DestinationTestState {
     bool acceptPrepareAfterSourceTimeout = false;
     bool rejectSourceFinish = false;
     bool failSourceFinishTransport = false;
+    protos::FinalResultState sourceQueryState = protos::FINAL_RESULT_UNKNOWN;
+    bool failSourceQueryTransport = false;
+    int sourceQueryCalls = 0;
     bool failSourceSuccessNotify = false;
     bool failSourceCipherFetch = false;
     bool injectSourceCipherLength = false;
@@ -1229,6 +1232,56 @@ TEST_F(DestinationMigrationAdmissionTest, FinalReplyReplaysAfterSessionCleanup)
     EXPECT_EQ(State().successNotificationCalls, 1);
 }
 
+TEST_F(DestinationMigrationAdmissionTest, FinalQueryReportsRecordedSuccessWithoutReexecuting)
+{
+    constexpr const char *uuid = "12345678-1234-1234-1234-123456789010";
+    State().acceptSuccessNotification = true;
+    ASSERT_TRUE(AdvanceToAwaitingFinish(uuid));
+    protos::MigrateResultRequest finish;
+    finish.set_uuid(uuid);
+    finish.set_attempt_id(TestAttemptId(uuid));
+    finish.set_result(0);
+    protos::MigrateResultReply finished;
+    ASSERT_TRUE(service_.NotifyVRMigrateResult(nullptr, &finish, &finished).ok());
+    ASSERT_EQ(finished.result(), 0U);
+
+    protos::QueryMigrationFinalResultRequest query;
+    query.set_uuid(uuid);
+    query.set_attempt_id(TestAttemptId(uuid));
+    protos::QueryMigrationFinalResultReply reply;
+    ASSERT_TRUE(service_.QueryMigrationFinalResult(nullptr, &query, &reply).ok());
+    EXPECT_EQ(reply.state(), protos::FINAL_RESULT_COMPLETED_SUCCESS);
+    EXPECT_EQ(State().successNotificationCalls, 1);
+
+    query.set_uuid("12345678-1234-1234-1234-123456789001");
+    ASSERT_TRUE(service_.QueryMigrationFinalResult(nullptr, &query, &reply).ok());
+    EXPECT_EQ(reply.state(), protos::FINAL_RESULT_UNKNOWN);
+}
+
+TEST_F(DestinationMigrationAdmissionTest, LocalManualQueryForwardsOnlyToValidatedDestination)
+{
+    State().sourceQueryState = protos::FINAL_RESULT_COMPLETED_SUCCESS;
+    protos::QueryMigrationFinalResultRequest request;
+    request.set_uuid("12345678-1234-1234-1234-123456789010");
+    request.set_attempt_id(TestAttemptId(request.uuid()));
+    request.set_dest_uri("qemu+tls://192.168.1.100/system");
+    protos::QueryMigrationFinalResultReply reply;
+    ASSERT_TRUE(service_.DomainQueryMigrationFinalResult(nullptr, &request, &reply).ok());
+    EXPECT_EQ(reply.state(), protos::FINAL_RESULT_COMPLETED_SUCCESS);
+    EXPECT_EQ(State().sourceQueryCalls, 1);
+
+    // 人工查询对处理中状态只转发一次，不在本机守护进程内等待最终完成。
+    State().sourceQueryState = protos::FINAL_RESULT_IN_PROGRESS;
+    ASSERT_TRUE(service_.DomainQueryMigrationFinalResult(nullptr, &request, &reply).ok());
+    EXPECT_EQ(reply.state(), protos::FINAL_RESULT_IN_PROGRESS);
+    EXPECT_EQ(State().sourceQueryCalls, 2);
+
+    request.set_dest_uri("qemu+tls://192.168.1.100/system?unsafe=1");
+    EXPECT_EQ(service_.DomainQueryMigrationFinalResult(nullptr, &request, &reply).error_code(),
+              grpc::StatusCode::INVALID_ARGUMENT);
+    EXPECT_EQ(State().sourceQueryCalls, 2);
+}
+
 TEST_F(DestinationMigrationAdmissionTest, OldFinalReplyIsNotReplayedIntoReplacementSession)
 {
     constexpr const char *uuid = "12345678-1234-1234-1234-123456789010";
@@ -1250,6 +1303,13 @@ TEST_F(DestinationMigrationAdmissionTest, OldFinalReplyIsNotReplayedIntoReplacem
     protos::MigrateResultReply repeated;
     EXPECT_EQ(service_.NotifyVRMigrateResult(nullptr, &request, &repeated).error_code(),
               grpc::StatusCode::FAILED_PRECONDITION);
+    // 旧结果不能在同 UUID 的新会话期间被源端当作本次最终确认。
+    protos::QueryMigrationFinalResultRequest query;
+    query.set_uuid(uuid);
+    query.set_attempt_id(request.attempt_id());
+    protos::QueryMigrationFinalResultReply queried;
+    ASSERT_TRUE(service_.QueryMigrationFinalResult(nullptr, &query, &queried).ok());
+    EXPECT_EQ(queried.state(), protos::FINAL_RESULT_UNKNOWN);
     EXPECT_EQ(SessionManager::GetInstance().GetSession(uuid), replacement);
     EXPECT_EQ(State().successNotificationCalls, 1);
     State().expectedOutstandingUuid = uuid;
@@ -1273,6 +1333,13 @@ TEST_F(DestinationMigrationAdmissionTest, FailureNotificationAfterImportReleases
     EXPECT_EQ(State().removeCalls, 0);
     EXPECT_EQ(State().createVRootCalls, 1);
     EXPECT_EQ(SessionManager::GetInstance().GetSession(uuid), nullptr);
+    // 最终通知的 ACK 成功不等于迁移成功；源端报告失败仍只能查询到失败事实。
+    protos::QueryMigrationFinalResultRequest query;
+    query.set_uuid(uuid);
+    query.set_attempt_id(request.attempt_id());
+    protos::QueryMigrationFinalResultReply queried;
+    ASSERT_TRUE(service_.QueryMigrationFinalResult(nullptr, &query, &queried).ok());
+    EXPECT_EQ(queried.state(), protos::FINAL_RESULT_COMPLETED_FAILURE);
     EXPECT_EQ(OrdinaryProbe(), LockOutcome::Acquired);
 }
 
@@ -2019,6 +2086,41 @@ TEST_F(DestinationMigrationAdmissionTest, LostFinalReplyPreservesSourceResources
     EXPECT_EQ(diagnostic.confirmedSteps & static_cast<uint32_t>(MigrationStep::DestinationConfirmed), 0U);
 }
 
+TEST_F(DestinationMigrationAdmissionTest, LostFinalReplyConfirmedByReadOnlyQueryContinuesSourceCleanup)
+{
+    State().failSourceFinishTransport = true;
+    State().sourceQueryState = protos::FINAL_RESULT_COMPLETED_SUCCESS;
+    EXPECT_EQ(RunSourceWithObservedUndefine(), MigrateSessionRc::OK);
+    EXPECT_EQ(State().clientNotifyCalls, 1);
+    EXPECT_EQ(State().sourceQueryCalls, 1);
+    EXPECT_EQ(State().removeCalls, 1);
+    EXPECT_EQ(State().undefineCalls, 1);
+    EXPECT_EQ(State().lastSourceDiagnostic.outcome, MigrationOutcome::Success);
+}
+
+TEST_F(DestinationMigrationAdmissionTest, LostFinalReplyWithRecordedFailurePreservesSourceResources)
+{
+    State().failSourceFinishTransport = true;
+    State().sourceQueryState = protos::FINAL_RESULT_COMPLETED_FAILURE;
+    EXPECT_EQ(RunSourceWithObservedUndefine(), MigrateSessionRc::ERROR);
+    EXPECT_EQ(State().clientNotifyCalls, 1);
+    EXPECT_EQ(State().sourceQueryCalls, 1);
+    EXPECT_EQ(State().removeCalls, 0);
+    EXPECT_EQ(State().undefineCalls, 0);
+    EXPECT_NE(State().lastSourceDiagnostic.outcome, MigrationOutcome::Success);
+}
+
+TEST_F(DestinationMigrationAdmissionTest, LostFinalReplyAndFailedReadOnlyQueryRemainUnknown)
+{
+    State().failSourceFinishTransport = true;
+    State().failSourceQueryTransport = true;
+    EXPECT_EQ(RunSourceWithObservedUndefine(), MigrateSessionRc::ERROR);
+    EXPECT_EQ(State().sourceQueryCalls, 1);
+    EXPECT_EQ(State().removeCalls, 0);
+    EXPECT_EQ(State().undefineCalls, 0);
+    EXPECT_EQ(State().lastSourceDiagnostic.outcome, MigrationOutcome::Unknown);
+}
+
 // 同名虚机的 UUID 发生变化时，不删除原 UUID 的可信资源，也不取消新虚机的定义。
 TEST_F(DestinationMigrationAdmissionTest, SourceCleanupRejectsChangedDefinitionIdentity)
 {
@@ -2434,6 +2536,36 @@ extern "C" int32_t WrappedDestinationClientNotify(virtrust::RpcClientMock *self,
         virtrust::State().sourceCompletionOrder.push_back("destination-success-reply");
     }
     return result;
+}
+
+extern "C" int32_t WrappedDestinationClientQuery(virtrust::RpcClientMock *, uint32_t,
+    const virtrust::protos::QueryMigrationFinalResultRequest &,
+    virtrust::protos::QueryMigrationFinalResultReply *)
+    asm("__wrap__ZN8virtrust13RpcClientMock25QueryMigrationFinalResultEjRKNS_6protos32QueryMigrationFinalResultRequestEPNS1_30QueryMigrationFinalResultReplyE");
+extern "C" int32_t WrappedDestinationClientQuery(virtrust::RpcClientMock *, uint32_t timeout,
+    const virtrust::protos::QueryMigrationFinalResultRequest &request,
+    virtrust::protos::QueryMigrationFinalResultReply *response)
+{
+    EXPECT_GT(timeout, 0U);
+    EXPECT_FALSE(request.uuid().empty());
+    EXPECT_EQ(request.attempt_id().size(), 32U);
+    ++virtrust::State().sourceQueryCalls;
+    if (virtrust::State().failSourceQueryTransport) {
+        return virtrust::RPC_TRANSPORT_FAILURE;
+    }
+    response->set_state(virtrust::State().sourceQueryState);
+    return 0;
+}
+
+extern "C" int32_t WrappedDestinationClientQueryOnce(virtrust::RpcClientMock *, uint32_t,
+    const virtrust::protos::QueryMigrationFinalResultRequest &,
+    virtrust::protos::QueryMigrationFinalResultReply *)
+    asm("__wrap__ZN8virtrust13RpcClientMock29QueryMigrationFinalResultOnceEjRKNS_6protos32QueryMigrationFinalResultRequestEPNS1_30QueryMigrationFinalResultReplyE");
+extern "C" int32_t WrappedDestinationClientQueryOnce(virtrust::RpcClientMock *client, uint32_t timeout,
+    const virtrust::protos::QueryMigrationFinalResultRequest &request,
+    virtrust::protos::QueryMigrationFinalResultReply *response)
+{
+    return WrappedDestinationClientQuery(client, timeout, request, response);
 }
 
 extern "C" int32_t RealDestinationClientTransfer(virtrust::RpcClientMock *, uint32_t,

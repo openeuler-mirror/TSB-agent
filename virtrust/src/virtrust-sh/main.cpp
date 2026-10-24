@@ -48,6 +48,7 @@ void PrintUsage(std::string_view progname)
                "    destroy                        destroy (stop) a domain\n"
                "    list                           list domain information\n"
                "    migrate                        migrate domain to another host\n"
+               "    migration-result               query a recorded destination final result\n"
                "    start                          start a (previously define) inactive "
                "domain\n"
                "    undefine                       undefine a domain\n"

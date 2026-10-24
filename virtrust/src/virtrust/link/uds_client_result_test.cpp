@@ -18,12 +18,28 @@ namespace {
 class ReplyService final : public protos::MigrationService::Service {
 public:
     protos::DomainMigraterReply reply;
+    protos::QueryMigrationFinalResultReply queryReply;
     grpc::Status status;
+    std::string expectedAttempt;
 
-    grpc::Status DomainMigrate(grpc::ServerContext *, const protos::DomainMigraterRequest *,
+    grpc::Status DomainMigrate(grpc::ServerContext *, const protos::DomainMigraterRequest *request,
                                protos::DomainMigraterReply *response) override
     {
+        if (!expectedAttempt.empty()) {
+            EXPECT_EQ(request->attempt_id(), expectedAttempt);
+        }
         *response = reply;
+        return status;
+    }
+
+    grpc::Status DomainQueryMigrationFinalResult(grpc::ServerContext *,
+        const protos::QueryMigrationFinalResultRequest *request,
+        protos::QueryMigrationFinalResultReply *response) override
+    {
+        EXPECT_EQ(request->uuid(), "12345678-1234-1234-1234-123456789001");
+        EXPECT_EQ(request->attempt_id(), "0123456789abcdef0123456789abcdef");
+        EXPECT_EQ(request->dest_uri(), "qemu+tls://192.168.1.100/system");
+        *response = queryReply;
         return status;
     }
 };
@@ -86,6 +102,7 @@ TEST_F(UdsClientResultTest, BusinessReplyPreservesPartialDiagnostic)
     expected.confirmedSteps = static_cast<uint32_t>(MigrationStep::DestinationConfirmed);
     expected.manualCheckRequired = true;
     service_.reply.set_result(static_cast<uint32_t>(expected.rc));
+    service_.reply.set_attempt_id("0123456789abcdef0123456789abcdef");
     ToProto(expected, service_.reply.mutable_diagnostic());
     ASSERT_NO_FATAL_FAILURE(StartServer());
 
@@ -98,6 +115,32 @@ TEST_F(UdsClientResultTest, BusinessReplyPreservesPartialDiagnostic)
     EXPECT_EQ(actual.primaryError.rawCode, expected.primaryError.rawCode);
     EXPECT_EQ(actual.confirmedSteps, expected.confirmedSteps);
     EXPECT_TRUE(actual.manualCheckRequired);
+    EXPECT_EQ(actual.attemptId, "0123456789abcdef0123456789abcdef");
+}
+
+TEST_F(UdsClientResultTest, RejectsMalformedAttemptIdFromUdsReply)
+{
+    service_.reply.set_result(static_cast<uint32_t>(VirtrustRc::ERROR));
+    service_.reply.set_attempt_id("malformed\ntext");
+    MigrationResult expected;
+    expected.outcome = MigrationOutcome::FailedBeforeEffect;
+    expected.manualCheckRequired = false;
+    ToProto(expected, service_.reply.mutable_diagnostic());
+    ASSERT_NO_FATAL_FAILURE(StartServer());
+
+    UdsClient client(config_);
+    EXPECT_TRUE(client.DomainMigrate(MigrationConfig{}).attemptId.empty());
+}
+
+TEST_F(UdsClientResultTest, ReadOnlyManualQueryReturnsRecordedState)
+{
+    service_.queryReply.set_state(protos::FINAL_RESULT_COMPLETED_SUCCESS);
+    ASSERT_NO_FATAL_FAILURE(StartServer());
+    UdsClient client(config_);
+    const auto result = client.QueryMigrationFinalResult(
+        "12345678-1234-1234-1234-123456789001", "qemu+tls://192.168.1.100/system",
+        "0123456789abcdef0123456789abcdef");
+    EXPECT_EQ(result.state, MigrationFinalState::CompletedSuccess);
 }
 
 TEST_F(UdsClientResultTest, TransportFailureIgnoresSuccessfulLookingReply)
@@ -123,6 +166,38 @@ TEST_F(UdsClientResultTest, TransportFailureIgnoresSuccessfulLookingReply)
     EXPECT_EQ(actual.primaryError.origin, MigrationErrorOrigin::Grpc);
     EXPECT_FALSE(actual.primaryError.hasRawCode);
     EXPECT_TRUE(actual.manualCheckRequired);
+}
+
+TEST_F(UdsClientResultTest, TransportFailurePreservesCallerAttemptForManualCheck)
+{
+    service_.status = grpc::Status(grpc::StatusCode::UNAVAILABLE, "injected transport failure");
+    ASSERT_NO_FATAL_FAILURE(StartServer());
+    MigrationConfig migration{};
+    migration.attemptId = "0123456789abcdef0123456789abcdef";
+    service_.expectedAttempt = migration.attemptId;
+    UdsClient client(config_);
+    const auto result = client.DomainMigrate(migration);
+    EXPECT_EQ(result.outcome, MigrationOutcome::Unknown);
+    EXPECT_EQ(result.attemptId, migration.attemptId);
+}
+
+TEST_F(UdsClientResultTest, RejectsReplyForDifferentAttempt)
+{
+    service_.reply.set_result(static_cast<uint32_t>(VirtrustRc::OK));
+    service_.reply.set_attempt_id("fedcba9876543210fedcba9876543210");
+    MigrationResult completed;
+    completed.rc = VirtrustRc::OK;
+    completed.outcome = MigrationOutcome::Success;
+    completed.confirmedSteps = AllConfirmedSteps();
+    completed.manualCheckRequired = false;
+    ToProto(completed, service_.reply.mutable_diagnostic());
+    ASSERT_NO_FATAL_FAILURE(StartServer());
+    MigrationConfig migration{};
+    migration.attemptId = "0123456789abcdef0123456789abcdef";
+    UdsClient client(config_);
+    const auto result = client.DomainMigrate(migration);
+    EXPECT_EQ(result.outcome, MigrationOutcome::Unknown);
+    EXPECT_EQ(result.attemptId, migration.attemptId);
 }
 
 TEST_F(UdsClientResultTest, MissingDiagnosticIsNotSuccessfulMigration)

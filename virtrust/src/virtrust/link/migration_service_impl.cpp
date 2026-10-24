@@ -5,9 +5,11 @@
 #include "virtrust/link/migration_service_impl.h"
 
 #include <memory>
+#include <optional>
 #include <exception>
 #include <chrono>
 #include <thread>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 
@@ -20,6 +22,7 @@
 #include "virtrust/dllib/libvirt.h"
 #include "virtrust/link/defines.h"
 #include "virtrust/link/grpc_client.h"
+#include "virtrust/link/migration_attempt_id.h"
 #include "virtrust/link/migration_destination_uri.h"
 #include "virtrust/link/migration_result.h"
 #include "virtrust/link/migration_session.h"
@@ -174,19 +177,6 @@ MigrateSessionRc RunResponderStep(const std::shared_ptr<MigrationSession> &sessi
     return MigrateSessionRc::ERROR;
 }
 
-bool ValidAttemptId(const std::string &id) noexcept
-{
-    if (id.size() != 32) {
-        return false;
-    }
-    for (const char value : id) {
-        if (!((value >= '0' && value <= '9') || (value >= 'a' && value <= 'f'))) {
-            return false;
-        }
-    }
-    return true;
-}
-
 // 入口先判重，再运行原有业务；完整请求与回复序列化后用于同阶段结果回放。
 template <typename Request, typename Reply, typename Action>
 grpc::Status RunCached(MigrationReplayCache &cache, MigrationReplayCache::Step step,
@@ -195,7 +185,7 @@ grpc::Status RunCached(MigrationReplayCache &cache, MigrationReplayCache::Step s
     if (request == nullptr || response == nullptr) {
         return {grpc::StatusCode::INVALID_ARGUMENT, "Migration request or reply is null"};
     }
-    if (!ValidAttemptId(request->attempt_id())) {
+    if (!ValidMigrationAttemptId(request->attempt_id())) {
         return {grpc::StatusCode::INVALID_ARGUMENT, "Migration attempt ID is missing or invalid"};
     }
     MigrationReplayCache::Admission admission;
@@ -206,7 +196,9 @@ grpc::Status RunCached(MigrationReplayCache &cache, MigrationReplayCache::Step s
         if (!request->SerializeToString(&requestBytes)) {
             return {grpc::StatusCode::INTERNAL, "Failed to serialize migration request"};
         }
-        admission = cache.Begin(request->attempt_id(), step, requestBytes);
+        admission = cache.Begin(request->attempt_id(), step, requestBytes,
+                                MigrationReplayCache::Clock::now(), request->uuid());
+        // 判重发生在业务动作前：只有 Execute 才能落入下方 action，其他结论直接返回。
         switch (admission.decision) {
             case MigrationReplayCache::Decision::Replay:
                 // 旧成功回复不能越过同 UUID 已登记的新尝试；无会话时允许重放收尾回复。
@@ -241,7 +233,15 @@ grpc::Status RunCached(MigrationReplayCache &cache, MigrationReplayCache::Step s
             cache.CompleteUnreplayable(admission);
             return {grpc::StatusCode::INTERNAL, "Failed to serialize migration reply"};
         }
-        if (!cache.Complete(admission, replyBytes)) {
+        // ACK 为零只证明通知已处理；源端上报失败时不能把迁移本身标成成功。
+        // gRPC 失败时即使 protobuf 默认 result 为零，也不能记录为目的端完成成功。
+        std::optional<bool> finalSuccess;
+        if constexpr (std::is_same_v<Request, protos::MigrateResultRequest>) {
+            if (step == MigrationReplayCache::Step::Finish && status.ok()) {
+                finalSuccess = request->result() == 0 && response->result() == 0;
+            }
+        }
+        if (!cache.Complete(admission, replyBytes, MigrationReplayCache::Clock::now(), finalSuccess)) {
             // 副作用可能已完成；保留墓碑并返回真实首发结果，重复请求将收到不可回放错误。
             try {
                 VIRTRUST_LOG_ERROR("Migration replay result could not be retained: attempt={}, step={}",
@@ -275,6 +275,7 @@ bool MatchResponderAttempt(const std::shared_ptr<MigrationSession> &session, con
 
 MigrationServiceImpl::MigrationServiceImpl()
     // 服务实例覆盖 gRPC Server 生命周期，缓存跨请求存在；活跃会话的旧阶段不按 TTL 淘汰。
+    // 探针只按 attempt ID 查询已登记会话，防止长会话使早期阶段的回放记录提前过期。
     : replayCache_(256, 16 * 1024 * 1024, std::chrono::minutes(10),
                    [](const std::string &attemptId) {
                        return SessionManager::GetInstance().HasAttempt(attemptId);
@@ -513,6 +514,81 @@ grpc::Status MigrationServiceImpl::NotifyVRMigrateResult(grpc::ServerContext *co
                      [&] { return NotifyVRMigrateResultUncached(context, request, response); });
 }
 
+grpc::Status MigrationServiceImpl::QueryMigrationFinalResult(
+    grpc::ServerContext *, const protos::QueryMigrationFinalResultRequest *request,
+    protos::QueryMigrationFinalResultReply *response)
+{
+    if (request == nullptr || response == nullptr || request->uuid().empty() ||
+        !ValidMigrationAttemptId(request->attempt_id())) {
+        return {grpc::StatusCode::INVALID_ARGUMENT, "Invalid migration final-result query"};
+    }
+    try {
+        // 同 UUID 已登记另一轮会话时，旧缓存事实不能被当作当前尝试的最终确认。
+        const auto current = SessionManager::GetInstance().GetSession(request->uuid());
+        if (current != nullptr && current->AttemptId() != request->attempt_id()) {
+            response->set_state(protos::FINAL_RESULT_UNKNOWN);
+            return grpc::Status::OK;
+        }
+        const auto snapshot = replayCache_.QueryFinal(request->uuid(), request->attempt_id());
+        // 查询只读取内存快照，不调用可信组件，也不推进目的端会话状态。
+        switch (snapshot.state) {
+            case MigrationReplayCache::FinalState::InProgress:
+                response->set_state(protos::FINAL_RESULT_IN_PROGRESS);
+                break;
+            case MigrationReplayCache::FinalState::CompletedSuccess:
+                response->set_state(protos::FINAL_RESULT_COMPLETED_SUCCESS);
+                break;
+            case MigrationReplayCache::FinalState::CompletedFailure: {
+                protos::MigrateResultReply recorded;
+                if (!recorded.ParseFromString(snapshot.reply)) {
+                    return {grpc::StatusCode::INTERNAL, "Failed to decode recorded migration result"};
+                }
+                response->set_state(protos::FINAL_RESULT_COMPLETED_FAILURE);
+                if (recorded.has_diagnostic()) {
+                    *response->mutable_diagnostic() = recorded.diagnostic();
+                }
+                break;
+            }
+            case MigrationReplayCache::FinalState::Unknown:
+                response->set_state(protos::FINAL_RESULT_UNKNOWN);
+                break;
+        }
+        return grpc::Status::OK;
+    } catch (...) {
+        return {grpc::StatusCode::INTERNAL, "Migration final-result query failed"};
+    }
+}
+
+grpc::Status MigrationServiceImpl::DomainQueryMigrationFinalResult(
+    grpc::ServerContext *, const protos::QueryMigrationFinalResultRequest *request,
+    protos::QueryMigrationFinalResultReply *response)
+{
+    if (request == nullptr || response == nullptr || request->uuid().empty() ||
+        !ValidMigrationAttemptId(request->attempt_id())) {
+        return {grpc::StatusCode::INVALID_ARGUMENT, "Invalid local migration result query"};
+    }
+    std::string destIp;
+    if (!ParseMigrationDestinationUri(request->dest_uri(), destIp)) {
+        return {grpc::StatusCode::INVALID_ARGUMENT, "Invalid migration destination URI"};
+    }
+    try {
+        // 手工查询不取得迁移独占资格，也不要求原会话存在；节点间身份仍由现有 TLS 配置约束。
+        LinkConfig config = ConfigMgr::Instance().GetLinkConfig();
+        config.ip = destIp;
+        RpcClient client(config);
+        protos::QueryMigrationFinalResultRequest peerRequest;
+        peerRequest.set_uuid(request->uuid());
+        peerRequest.set_attempt_id(request->attempt_id());
+        // 人工查询需要观察目的端当下的 IN_PROGRESS，不等待它变成终态。
+        if (client.QueryMigrationFinalResultOnce(5, peerRequest, response) == RPC_TRANSPORT_FAILURE) {
+            return {grpc::StatusCode::UNAVAILABLE, "Destination final-result query failed"};
+        }
+        return grpc::Status::OK;
+    } catch (...) {
+        return {grpc::StatusCode::INTERNAL, "Local migration result query failed"};
+    }
+}
+
 grpc::Status MigrationServiceImpl::NotifyVRMigrateResultUncached(grpc::ServerContext *context,
                                                                  const protos::MigrateResultRequest *request,
                                                                  protos::MigrateResultReply *response)
@@ -562,6 +638,10 @@ grpc::Status MigrationServiceImpl::DomainMigrate(grpc::ServerContext *context,
     std::shared_ptr<MigrationSession> session;
     bool sessionCreated = false;
     try {
+        // 有效的调用方身份先于预检查回填；Busy/验证失败也必须能被 UDS 客户端匹配。
+        if (ValidMigrationAttemptId(request->attempt_id())) {
+            response->set_attempt_id(request->attempt_id());
+        }
         VIRTRUST_LOG_DEBUG("|DomainMigrate|START||start handle uds request");
         // 独立校验 UDS 输入，防止调用方绕过 API 让本节点锁保护远端 libvirt 操作。
         if (!IsLocalMigrationSourceUri(request->localuri())) {
@@ -590,6 +670,11 @@ grpc::Status MigrationServiceImpl::DomainMigrate(grpc::ServerContext *context,
             }
             return grpc::Status::OK;
         }
+        if (!request->attempt_id().empty() && !ValidMigrationAttemptId(request->attempt_id())) {
+            SetSourcePreflightFailure(response, VirtrustRc::ERROR, MigrationOperation::Validate,
+                                      MigrationErrorOrigin::Validation);
+            return grpc::Status::OK;
+        }
 
         // 令牌由当前守护进程请求持有，直至源端状态机和 Cleanup 全部返回；不从 API 转移描述符。
         const auto outcome = admission.TryAcquire(AdmissionKind::Migration);
@@ -616,7 +701,8 @@ grpc::Status MigrationServiceImpl::DomainMigrate(grpc::ServerContext *context,
         auto &mgr = SessionManager::GetInstance();
         // 源端整个迁移过程始终由外层请求持锁admission；session 无须再获取同一节点的锁
         session = mgr.CreateSession(MigrationSession::Role::Initiator, request->uuid(), request->domainname(),
-                                    request->desturi(), request->localuri(), request->flags());
+                                    request->desturi(), request->localuri(), request->flags(), {},
+                                    request->attempt_id());
         if (!session) {
             SetSourcePreflightFailure(response, VirtrustRc::ERROR, MigrationOperation::Validate,
                                       MigrationErrorOrigin::Internal);
@@ -624,6 +710,8 @@ grpc::Status MigrationServiceImpl::DomainMigrate(grpc::ServerContext *context,
             return grpc::Status::OK;
         }
         sessionCreated = true;
+        // 直接调用 UDS 且未提供 attempt ID 时，源端会话会把这个实际用于会话的 ID写回回复。
+        response->set_attempt_id(session->AttemptId());
         // 源端会话同步运行；先清理会话，再由 admission 析构释放独占资格。
         session->SetRpcClient(std::make_unique<RpcClient>(config));
         // Start 同步串联跨节点准备、密钥交换、libvirt/可信资源传输及两端收尾。

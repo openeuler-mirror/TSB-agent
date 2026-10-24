@@ -25,6 +25,8 @@ struct AdmissionTestState {
     int getVRootsOverride = 0;
     // 1 注入负数量，2 注入正数量但空指针；两者都模拟 TSB 返回成功后的畸形输出。
     int malformedGetVRoots = 0;
+    // 注入底层已分配输出后失败：1 为 TSB 错误，2 为成功但数量为负。
+    int allocatedGetVRootsFailure = 0;
     bool failLegacyOpen = false;
     bool throwInBusiness = false;
     // 仅供 fork 专用测试在 execv 前核对继承的节点准入描述符。
@@ -50,6 +52,8 @@ struct AdmissionTestState {
     pid_t waitedChild = -1;
 };
 AdmissionTestState &AdmissionState();
+bool WasFailedGetVRootsOutputFreed();
+void ResetFailedGetVRootsOutputTracking();
 
 // 测试资源采用作用域所有权，断言提前返回或抛异常时仍关闭描述符。
 class TestFd {

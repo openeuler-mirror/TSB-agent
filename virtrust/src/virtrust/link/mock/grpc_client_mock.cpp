@@ -11,6 +11,12 @@
 
 namespace virtrust {
 
+MigrationFinalQueryResult UdsClientMock::QueryMigrationFinalResult(const std::string &, const std::string &,
+                                                                  const std::string &)
+{
+    return {};
+}
+
 MigrationResult UdsClientMock::DomainMigrate(const MigrationConfig &config)
 {
     // Create source migration session
@@ -21,7 +27,9 @@ MigrationResult UdsClientMock::DomainMigrate(const MigrationConfig &config)
         config.domainName,
         config.destUri,
         config.localUri,
-        config.flags
+        config.flags,
+        {},
+        config.attemptId
     );
     if (!session) {
         return MigrationResult{};
@@ -119,6 +127,29 @@ int32_t RpcClientMock::NotifyVRMigrateResult(uint32_t timeout, const protos::Mig
     response->Clear();
     response->set_result(0);
     return 0;
+}
+
+int32_t RpcClientMock::QueryMigrationFinalResult(uint32_t timeout,
+                                                 const protos::QueryMigrationFinalResultRequest &request,
+                                                 protos::QueryMigrationFinalResultReply *response)
+{
+    (void)timeout;
+    (void)request;
+    if (response == nullptr) {
+        return RPC_TRANSPORT_FAILURE;
+    }
+    // mock 没有真实目的端结果记录，缺省只能回答未知。
+    response->Clear();
+    response->set_state(protos::FINAL_RESULT_UNKNOWN);
+    return 0;
+}
+
+int32_t RpcClientMock::QueryMigrationFinalResultOnce(uint32_t timeout,
+                                                     const protos::QueryMigrationFinalResultRequest &request,
+                                                     protos::QueryMigrationFinalResultReply *response)
+{
+    // mock 的单次查询沿用同一状态提供点，不在此处额外轮询。
+    return QueryMigrationFinalResult(timeout, request, response);
 }
 
 protos::TrustReportNew RpcClientMock::GenerateMockTrustReport()

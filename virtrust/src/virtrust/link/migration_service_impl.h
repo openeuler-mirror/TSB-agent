@@ -16,6 +16,7 @@
 #include "virtrust/link/proto/migrate.grpc.pb.h"
 
 namespace virtrust {
+// 节点间五个阶段通过同一回放缓存判重；本机 UDS 入口负责创建源端同步会话。
 class MigrationServiceImpl final : public protos::MigrationService::Service {
 public:
     MigrationServiceImpl();
@@ -39,6 +40,16 @@ public:
     grpc::Status NotifyVRMigrateResult(grpc::ServerContext *context, const protos::MigrateResultRequest *request,
                                        protos::MigrateResultReply *response) override;
 
+    // 仅查看本进程已观察到的最终阶段结果；不触达可信组件或迁移会话。
+    grpc::Status QueryMigrationFinalResult(grpc::ServerContext *context,
+                                           const protos::QueryMigrationFinalResultRequest *request,
+                                           protos::QueryMigrationFinalResultReply *response) override;
+
+    // 本机只读查询入口：根据目的 URI 转发到目的端，不创建或推进迁移会话。
+    grpc::Status DomainQueryMigrationFinalResult(grpc::ServerContext *context,
+                                                 const protos::QueryMigrationFinalResultRequest *request,
+                                                 protos::QueryMigrationFinalResultReply *response) override;
+
     // 6: 发起迁移任务
     grpc::Status DomainMigrate(grpc::ServerContext *context, const protos::DomainMigraterRequest *request,
                                protos::DomainMigraterReply *response) override;
@@ -47,6 +58,7 @@ private:
     // 缓存仅随此服务实例存活；所有跨节点阶段必须先通过同一去重入口。
     MigrationReplayCache replayCache_;
 
+    // Uncached 方法只在 RunCached 判定 Execute 后进入；重复消息不会重新执行阶段副作用。
     grpc::Status PrepareMigrationUncached(grpc::ServerContext *context, const protos::PrepareMigRequest *request,
                                           protos::PrepareMigReply *response);
     grpc::Status ExchangePkAndReportUncached(grpc::ServerContext *context,
